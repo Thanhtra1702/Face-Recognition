@@ -1,22 +1,24 @@
-# Hệ Thống Điểm Danh Sinh Viên Thông Minh (AI Kiosk) - Cầm tay & HD
+# Hệ Thống Điểm Danh Sinh Viên Thông Minh (AI Kiosk) - FastAPI & Anti-Spoofing
 
-Dự án Kiosk điểm danh sử dụng công nghệ nhận diện khuôn mặt tiên tiến (ArcFace + Mediapipe), giao diện Web App hiện đại, tối ưu hóa cho độ phân giải HD 720p và trải nghiệm người dùng cao cấp.
+Dự án Kiosk điểm danh sử dụng công nghệ nhận diện khuôn mặt tiên tiến (ArcFace + Mediapipe), tích hợp hệ thống chống giả mạo đa tầng (Anti-Spoofing), chạy trên nền tảng FastAPI hiệu năng cao.
 
 ## 🚀 Tính Năng Chính
 
-- **Nhận diện khuôn mặt HD:** Xử lý thời gian thực trên khung hình 1280x720, hình ảnh sắc nét, tracking mượt mà.
-- **Smart Snapshot:** Khi nhận diện thành công, hệ thống tự động "đóng băng" camera và vẽ khung xanh xác nhận chuyên nghiệp.
-- **Clean Snapshot Logic:** Lưu trữ song song bản ảnh có khung (để hiển thị) và bản ảnh SẠCH (để nạp AI), đảm bảo dữ liệu tự học đạt độ chính xác tuyệt đối.
-- **Phân loại khoảng cách:** Hệ thống chỉ kích hoạt nhận diện khi sinh viên đứng trong khoảng cách tối ưu (1.5m - 2m).
-- **Tốc độ cực nhanh (Fast Path):** Tự động bỏ qua bước xác thực lần 2 nếu độ tin cậy đạt trên 65% (Score > 0.65).
-- **Multi-Vector & Augmentation:** Tạo ra 8 biến thể (xoay, sáng, tối, tương phản...) cho mỗi ảnh mẫu để AI nhận diện tốt trong mọi điều kiện ánh sáng.
+- **FastAPI Core:** Sử dụng FastAPI thay thế Flask để đạt tốc độ phản hồi cực nhanh, xử lý bất đồng bộ (Asynchronous) tối ưu.
+- **Chống Giả Mạo Đa Tầng (Dual-Layer Anti-Spoofing):**
+  - **Tầng 1 (Passive):** Sử dụng MiniFASNetV2 phân tích bề mặt da, phát hiện ảnh chụp hoặc video giả mạo với độ chính xác cao.
+  - **Tầng 2 (Active Fallback):** Yêu cầu nháy mắt (Blink Detection) nếu AI nghi ngờ hoặc điều kiện ánh sáng không lý tưởng.
+- **Nhận diện khuôn mặt HD:** Xử lý thời gian thực trên khung hình 1280x720, tracking mượt mà, độ trễ thấp.
+- **Smart Snapshot:** Tự động "đóng băng" camera và vẽ khung xanh xác nhận khi nhận diện thành công.
+- **Clean Snapshot & Self-Learning:** Lưu trữ song song ảnh gốc (Clean) để tự động training lại hệ thống, nâng cao độ chính xác theo thời gian.
+- **Phân loại khoảng cách:** Chỉ kích hoạt nhận diện khi sinh viên đứng trong khoảng cách tối ưu (1.5m - 2m).
 
 ## 🛠 Yêu Cầu Hệ Thống
 
 - **OS:** Windows 10/11, macOS, hoặc Linux.
 - **Python:** 3.8 - 3.10 (Khuyên dùng 3.10).
 - **Webcam:** Hỗ trợ HD 720p.
-- **Thư viện:** mediapipe, deepface, flask, qdrant-client, opencv-python.
+- **Thư viện chính:** mediapipe, deepface, fastapi, uvicorn, qdrant-client, onnxruntime, opencv-python.
 
 ## 📦 Cài Đặt
 
@@ -55,16 +57,11 @@ pip install -r requirements.txt
    python setup_database.py
    ```
 
-### Quy trình nạp dữ liệu tự động (Smart Data Processing)
+3. **Xử lý ảnh tự học & Augmentation:**
 
-- Khi sinh viên điểm danh và bấm **Xác nhận**, hệ thống tự động lưu **Ảnh SẠCH** vào `collected_faces/{MSSV}/`.
-- Chạy: `python process_collected_faces.py`
-- **Cơ chế thông minh:**
-  - **Tự động nhận diện & cắt khuôn mặt:** Sử dụng ArcFace + Mediapipe.
-  - **Auto-Update SQLite:** Nếu sinh viên mới chưa có trong `student_info.db`, script sẽ tự động tạo thông tin mẫu (tên, lịch học, phòng).
-  - **Auto-Update Qdrant:** Tạo x8 biến thể ảnh (Augmentation) để AI nhận diện nhạy hơn.
-  - **Smart Avatar:** Chỉ cập nhật ảnh đại diện trong thư mục `database/` nếu ảnh mới có chất lượng (độ phân giải) tốt hơn ảnh cũ.
-  - **Lưu trữ:** Ảnh gốc sau khi xử lý được di chuyển vào `collected_faces/processed/{MSSV}/` để đối soát.
+   ```bash
+   python process_collected_faces.py
+   ```
 
 ## 🖥 Chạy Ứng Dụng Kiosk
 
@@ -73,33 +70,37 @@ python app.py
 ```
 
 - Truy cập: `http://localhost:5000`
-- Bấm **F11** để vào chế độ Toàn màn hình.
+- Nhấn **Ctrl+C**: Tắt ứng dụng ngay lập tức (Xử lý dứt khoát).
+
+## 📂 Cấu Trúc Dự Án (Modular Structure)
+
+Dự án được phân tách thành các module chuyên biệt để dễ bảo trì và mở rộng:
+
+```text
+📁 student_face/
+├── 📄 app.py                     # Entry point (FastAPI Server & Camera Loop)
+├── 📄 anti_spoof.py              # Logic Chống giả mạo & Thị giác máy tính
+├── 📄 recognition.py             # Logic Nhận diện khuôn mặt (DeepFace & Qdrant)
+├── 📄 core_state.py              # Quản lý trạng thái hệ thống (KioskState)
+├── 📄 kiosk_db.py                # Database Handler (Qdrant + SQLite)
+├── 📄 process_collected_faces.py # Xử lý ảnh tự học & Augmentation
+├── 📁 templates/                 # UI (FastAPI Jinja2 Templates)
+├── 📁 static/                    # Assets (CSS/JS/Images)
+├── 📁 collected_faces/           # Ảnh chờ xử lý / processed
+├── 📄 MiniFASNetV2.onnx          # Model AI Chống giả mạo
+└── 📁 qdrant_db/                 # Vector Database
+```
 
 ## 🔒 Thông số tối ưu (Current Config)
 
 - **Resolution:** 1280x720 (720p HD).
-- **Threshold:** 0.45 (Cân bằng Tốc độ/Chính xác).
-- **Gap Check:** 0.02 (Lọc nhập nhằng ID khác).
-- **Image Enhance:** CLAHE 3.0 (Cân bằng sáng HD).
-- **Fast Path:** 0.65 (Xác nhận tức thì).
-
-## 📂 Cấu Trúc Dự Án
-
-```text
-📁 student_face/
-├── 📄 app.py                     # Web Server & Core AI (HD Logic)
-├── 📄 kiosk_db.py                # Database Handler (Qdrant + SQLite)
-├── 📄 setup_database.py          # Script khởi tạo SQLite ban đầu
-├── 📄 process_collected_faces.py # Xử lý ảnh tự học & Augmentation
-├── 📄 init_qdrant.py             # Khởi tạo Vector DB
-├── 📁 templates/                 # UI (HTML/CSS)
-├── 📁 collected_faces/           # Ảnh chờ xử lý / processed (đã lưu trữ)
-├── 📁 database/                  # Ảnh đại diện gốc
-└── 📁 qdrant_db/                 # Trí não AI (Vector Database)
-```
+- **Threshold:** 0.45 (Cơ bản) / 0.65 (Xác nhận tức thì).
+- **MiniFASNet Threshold:** 0.99 (Độ tin cậy liveness).
+- **Blink Threshold:** 0.20 (Ngưỡng nháy mắt).
+- **Image Enhance:** CLAHE 3.0 (Cân bằng sáng).
 
 ## ❓ Troubleshooting
 
-- **Nhận diện chậm:** Kiểm tra độ sáng môi trường. Đứng gần camera hơn sao cho khung tracking chuyển sang màu Cam.
-- **Nhận diện sai:** Xóa ảnh cũ trong `database/`, chụp lại ảnh mới sắc nét hơn và chạy lại `init_qdrant.py`.
-- **Camera lag:** Giảm độ phân giải trong `app.py` xuống 640x480 nếu CPU quá tải.
+- **Yêu cầu nháy mắt liên tục:** AI chưa đủ tin tưởng vào liveness (do ánh sáng hoặc chất lượng ảnh). Hãy đảm bảo khuôn mặt đủ sáng.
+- **Tắt ứng dụng:** Nếu nhấn Ctrl+C không tắt, hãy check lại file `app.py` xem đã được cập nhật bản FastAPI mới nhất chưa.
+- **Camera lag:** Đảm bảo PC của bạn hỗ trợ AVX2/FMA để thư viện TensorFlow/ONNX chạy nhanh hơn.
