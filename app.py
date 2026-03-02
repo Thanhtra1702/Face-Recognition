@@ -1,4 +1,7 @@
-from flask import Flask, render_template, Response, jsonify, request
+from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 import cv2
 import threading
 import time
@@ -7,6 +10,7 @@ import os
 import numpy as np
 from deepface import DeepFace
 from qdrant_client import QdrantClient
+from pydantic import BaseModel
 
 # Import DB handler từ module cũ
 from kiosk_db import DatabaseHandler
@@ -17,23 +21,27 @@ import onnxruntime as ort
 import signal
 import sys
 
-app = Flask(__name__)
+app = FastAPI()
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Templates
+templates = Jinja2Templates(directory="templates")
 
 # --- PRELOAD MODEL (Để khởi động nhanh hơn) ---
-print("🚀 Đang tải model AI...")
+print("🚀 Đang tải model AI (FastAPI)...")
 try:
     # Preload ArcFace model bằng cách tạo embedding giả
-    import numpy as np
     dummy_img = np.zeros((112, 112, 3), dtype=np.uint8)
     DeepFace.represent(img_path=dummy_img, model_name="ArcFace", detector_backend="skip", enforce_detection=False)
     print("✅ Model AI đã sẵn sàng!")
-except:
-    pass
+except Exception as e:
+    print(f"❌ Error preloading model: {e}")
 
 # --- QDRANT CLIENT ---
 QDRANT_PATH = "./qdrant_db"
 COLLECTION_NAME = "student_faces"
-# qdrant_client = QdrantClient(path=QDRANT_PATH) # REMOVED to avoid double locking
 
 # --- ANTI-SPOOF MODULE ---
 class AntiSpoof:
@@ -76,6 +84,7 @@ class KioskState:
         self.db = DatabaseHandler()
         self.anti_spoof = AntiSpoof()
         self.running = True # Cờ kiểm soát vòng lặp
+        self.pending_crop = None
         # Liveness State
         self.is_live = False
         self.fas_score = 0.0
@@ -91,47 +100,32 @@ state = KioskState()
 
 # Handle Ctrl+C
 def signal_handler(sig, frame):
-    print('👋 Đang tắt hệ thống NGAY LẬP TỨC...')
+    print('\n👋 Đang tắt hệ thống (FastAPI) NGAY LẬP TỨC...')
     state.running = False
-    # time.sleep(0.5)  <-- Xóa dòng này
-    os._exit(0)  # Force exit ngay lập tức
+    os._exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 
 # --- BLINK DETECTION HELPERS ---
 mp_face_mesh = mp.solutions.face_mesh
-# Index mắt trái/phải trong FaceMesh (Chuẩn Mediapipe)
 LEFT_EYE = [362, 385, 387, 263, 373, 380]
 RIGHT_EYE = [33, 160, 158, 133, 153, 144]
 
 def calculate_ear(landmarks, eye_indices, w, h):
-    """Tính Eye Aspect Ratio (Tỷ lệ mở mắt)"""
-    # Lấy tọa độ
     coords = []
     for idx in eye_indices:
         lm = landmarks[idx]
         coords.append((lm.x * w, lm.y * h))
-    
-    # Tính khoảng cách dọc (Vertical)
     v1 = np.linalg.norm(np.array(coords[1]) - np.array(coords[5]))
     v2 = np.linalg.norm(np.array(coords[2]) - np.array(coords[4]))
-    
-    # Tính khoảng cách ngang (Horizontal)
     h_dist = np.linalg.norm(np.array(coords[0]) - np.array(coords[3]))
-    
     ear = (v1 + v2) / (2.0 * h_dist)
     return ear
 
-# --- AI ENHANCEMENT HELPERS ---
 def preprocess_frame(frame):
-    """
-    Sử dụng CLAHE để cân bằng độ tương phản, giúp AI nhận diện tốt hơn 
-    trong điều kiện ánh sáng yếu hoặc bị ngược sáng.
-    """
     try:
         lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        # Cân bằng sáng (CLAHE) - Mức 3.0 là tối ưu nhất cho HD
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
         cl = clahe.apply(l)
         limg = cv2.merge((cl, a, b))
@@ -139,16 +133,11 @@ def preprocess_frame(frame):
     except:
         return frame
 
-def check_spoofing_opencv(frame, face_area=None):
-    return False, "Real"
-
 def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_max):
-    """Chạy AI Nhận diện - Sử dụng ảnh crop để xử lý nhưng dùng ảnh gốc để hiển thị"""
-    # face_crop lúc này đã là vùng được crop từ camera_worker (Zoomed face)
     try:
         input_frame = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
         
-        # --- 1. DETECT & EXTRACT FACE (Khôi phục lại bước alignment chuẩn) ---
+        # --- 1. DETECT & EXTRACT FACE ---
         face_objs = DeepFace.extract_faces(
             img_path=input_frame,
             detector_backend="mediapipe",
@@ -198,11 +187,7 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
             print(f"🎯 Top 1: {current_sid} - Score: {score:.4f}")
             
             accepted_sid = None
-            # --- TRIPLE CHECK LOGIC (Tối ưu Tốc độ) ---
-            # 1. Ngưỡng điểm cơ bản (0.45 là mức cân bằng nhất)
             is_passing_score = score > 0.45
-            
-            # 2. Gap Check (Giảm xuống 0.02 vì đã có xác nhận 2 lần)
             is_ambiguous = False
             competitor_score = 0
             for res in search_res[1:]:
@@ -228,8 +213,6 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
                         state.consecutive_match_count = 1
                     
                     print(f"🔄 Khớp lần {state.consecutive_match_count}/2 cho ID: {accepted_sid}")
-                    
-                    # --- FAST PATH: Khôi phục logic khớp 2 lần hoặc Score > 0.65 ---
                     is_very_sure = score > 0.65
                     
                     if state.consecutive_match_count >= 2 or is_very_sure:
@@ -242,11 +225,8 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
                             "room": room,
                             "checkin_time": datetime.datetime.now().strftime("%H:%M %d/%m")
                         }
-                        # --- SMART SNAPSHOT: Lưu 2 bản (Bản đẹp hiển thị và Bản sạch lưu DB) ---
-                        # 1. Lưu bản sạch (Original HD)
                         state.clean_snapshot = full_frame.copy()
                         
-                        # 2. Vẽ khung xanh lên bản copy để hiển thị (thickness=3, length=40 cho HD)
                         display_frame = full_frame.copy()
                         t, l = 3, 40
                         cv2.line(display_frame, (x_min, y_min), (x_min + l, y_min), (73, 132, 30), t)
@@ -290,11 +270,9 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
 # --- CAMERA THREAD ---
 def camera_worker():
     cap = cv2.VideoCapture(0)
-    # Nâng cấp lên HD 720p
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     
-    # Init Face Mesh
     face_mesh = mp_face_mesh.FaceMesh(
         max_num_faces=1,
         refine_landmarks=True,
@@ -306,27 +284,19 @@ def camera_worker():
         ret, frame = cap.read()
         if not ret: break
         frame = cv2.flip(frame, 1)
-        
-        # --- NEW: Lưu lại frame sạch để làm snapshot ---
         raw_frame = frame.copy()
-        
-        # --- STATE MACHINE ---
         current_time = time.time()
         
-        # --- MAIN FACE SELECTION (Anti-Crowd) ---
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = face_mesh.process(rgb_frame)
         
         if results.multi_face_landmarks:
             h, w, _ = frame.shape
             screen_center_x, screen_center_y = w // 2, h // 2
-            
             best_face_data = None
             max_focus_score = -1
 
-            # Duyệt qua tất cả mặt để tìm "Người chủ trì"
             for face_landmarks in results.multi_face_landmarks:
-                # Tính bounding box
                 x_min, y_min = w, h
                 x_max, y_max = 0, 0
                 for lm in face_landmarks.landmark:
@@ -334,43 +304,33 @@ def camera_worker():
                     x_min, y_min = min(x_min, cx), min(y_min, cy)
                     x_max, y_max = max(x_max, cx), max(y_max, cy)
                 
-                # Tính điểm ưu tiên (Diện tích * Độ trung tâm)
                 area = (x_max - x_min) * (y_max - y_min)
                 face_center_x = (x_min + x_max) / 2
                 face_center_y = (y_min + y_max) / 2
                 dist_to_center = ((face_center_x - screen_center_x)**2 + (face_center_y - screen_center_y)**2)**0.5
-                
-                # Heuristic: Ưu tiên mặt TO và GẦN TÂM
                 focus_score = area / (dist_to_center + 1) 
                 
                 if focus_score > max_focus_score:
                     max_focus_score = focus_score
                     best_face_data = (x_min, y_min, x_max, y_max)
 
-            # Chỉ vẽ và xử lý khuôn mặt TỐT NHẤT
             if best_face_data:
                 x_min, y_min, x_max, y_max = best_face_data
                 
-                # --- NEW: DUAL-LAYER ANTI-SPOOFING (MiniFASNet + Blink) ---
                 try:
-                    # Tầng 1: Passive (MiniFASNet)
-                    # Lấy vùng mặt để chạy AntiSpoof (Cần padding ít hơn để lấy texture)
                     fas_pad = int((x_max - x_min) * 0.1)
                     fx1, fy1 = max(0, x_min - fas_pad), max(0, y_min - fas_pad)
                     fx2, fy2 = min(w, x_max + fas_pad), min(h, y_max + fas_pad)
                     fas_face = raw_frame[fy1:fy2, fx1:fx2]
                     
                     if fas_face.size > 0:
-                        # Chỉ chạy AntiSpoof mỗi 3 frame hoặc khi chưa live để tiết kiệm CPU/Tăng FPS
                         if not hasattr(state, '_fas_frame_counter'): state._fas_frame_counter = 0
                         state._fas_frame_counter += 1
-                        
                         if state._fas_frame_counter % 3 == 0 or not state.is_live:
                             score = state.anti_spoof.predict(fas_face)
                             with state.lock:
                                 state.fas_score = score
                     
-                    # Tầng 2: Active (Blink Detection Fallback)
                     face_landmarks = results.multi_face_landmarks[0]
                     ear_left = calculate_ear(face_landmarks.landmark, LEFT_EYE, w, h)
                     ear_right = calculate_ear(face_landmarks.landmark, RIGHT_EYE, w, h)
@@ -385,31 +345,22 @@ def camera_worker():
                                 state._eye_closed = False
                                 state.last_blink_time = time.time()
                         
-                        # LOGIC QUYẾT ĐỊNH (Dual Layer Gateway)
-                        # Option A: MiniFASNet cực tin tưởng (> 0.99)
                         is_pass_fas = state.fas_score > 0.99
-                        # Option B: Có nháy mắt gần đây (trong 4 giây)
                         is_pass_blink = (time.time() - state.last_blink_time < 4.0)
-                        
                         state.is_live = is_pass_fas or is_pass_blink
                 except Exception as e:
                     print(f"Liveness Logic Error: {e}")
                 
-                # --- DISTANCE FILTER (720p Optimized) ---
                 face_width = x_max - x_min
-                is_near_enough = face_width > 180 # Mở rộng khoảng cách (~2m - 2.5m)
+                is_near_enough = face_width > 180 
                 
                 with state.lock:
                     state.is_near = is_near_enough
                 
-                # Vẽ box (HD Thickness)
-                color = (255, 255, 255) # White
-                if is_near_enough:
-                    color = (33, 111, 242) # FPT Orange
-                if state.status == "CONFIRM": 
-                    color = (73, 132, 30) # Green
+                color = (255, 255, 255)
+                if is_near_enough: color = (33, 111, 242)
+                if state.status == "CONFIRM": color = (73, 132, 30)
                 
-                # Vẽ góc Corner HD (Dày hơn một chút để sắc nét)
                 t, l = 3, 40
                 cv2.line(frame, (x_min, y_min), (x_min + l, y_min), color, t)
                 cv2.line(frame, (x_min, y_min), (x_min, y_min + l), color, t)
@@ -420,15 +371,11 @@ def camera_worker():
                 cv2.line(frame, (x_max, y_max), (x_max - l, y_max), color, t)
                 cv2.line(frame, (x_max, y_max), (x_max, y_max - l), color, t)
                 
-                # Trigger Processing - CHỈ KHI ĐỦ GẦN VÀ QUA ĐƯỢC CỬA LIVENESS
                 if is_near_enough and state.is_live and state.status == "SCANNING" and (current_time - state.last_scan_time > 1.0):
-                    # --- DIGITAL ZOOM (CROP FACE FOR AI) ---
-                    # Cắt vùng mặt có thêm 40% padding để AI dễ nhận diện hơn từ xa
                     pad_w = int((x_max - x_min) * 0.4)
                     pad_h = int((y_max - y_min) * 0.4)
                     x1, y1 = max(0, x_min - pad_w), max(0, y_min - pad_h)
                     x2, y2 = min(w, x_max + pad_w), min(h, y_max + pad_h)
-                    
                     face_crop = frame[y1:y2, x1:x2].copy()
                     
                     if face_crop.size > 0:
@@ -436,37 +383,30 @@ def camera_worker():
                             state.status = "PROCESSING"
                             state.process_start_time = current_time
                             state.progress = 0
-                            # Lưu face_crop để thread AI sử dụng
                             state.pending_crop = face_crop
 
-        # 2. PROCESSING logic (Sử dụng frame đã vẽ box làm preview)
         if state.status == "PROCESSING":
             elapsed = current_time - state.process_start_time
             if elapsed < 0:
                 with state.lock: state.progress = 90 + int((current_time * 10) % 9)
             else:
-                # Giảm thời gian chờ xuống 0.1s để cảm giác nhanh hơn
                 prog = int((elapsed / 0.2) * 90)
                 with state.lock: state.progress = min(90, max(0, prog))
                 if elapsed > 0.1:
-                    # Lấy vùng ảnh mặt đã crop từ state
                     with state.lock:
-                        ai_input = getattr(state, 'pending_crop', None)
+                        ai_input = state.pending_crop
                     
                     if ai_input is not None:
-                        # Tiền xử lý (Cân bằng sáng)
                         processed_ai_frame = preprocess_frame(ai_input.copy())
-                        # Truyền ảnh SẠCH (raw_frame) để vẽ khung xanh khi khóa frame
                         threading.Thread(target=run_recognition_async, 
                                        args=(processed_ai_frame, raw_frame.copy(), state, x_min, y_min, x_max, y_max), 
                                        daemon=True).start()
                         with state.lock: 
                             state.process_start_time = current_time + 1000 
-                            state.pending_crop = None # Clear sau khi gửi
+                            state.pending_crop = None
                     else:
                         with state.lock: state.status = "SCANNING"
 
-        # --- UPDATE FRAME (Chỉ update nếu không ở trạng thái CONFIRM) ---
         if state.status != "CONFIRM":
             with state.lock:
                 state.frame = frame.copy()
@@ -478,62 +418,54 @@ t = threading.Thread(target=camera_worker, daemon=True)
 t.start()
 
 # --- WEB ROUTES ---
-@app.route('/')
-def index():
-    return render_template('index.html')
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 def generate_frames():
     while True:
         with state.lock:
-            if state.frame is None: continue
-            
-            # encode frame
+            if state.frame is None: 
+                time.sleep(0.01)
+                continue
             _, buffer = cv2.imencode('.jpg', state.frame)
             frame_bytes = buffer.tobytes()
-            
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+@app.get("/video_feed")
+async def video_feed():
+    return StreamingResponse(generate_frames(), media_type="multipart/x-mixed-replace; boundary=frame")
 
-@app.route('/api/status')
-def get_status():
+@app.get("/api/status")
+async def get_status():
     with state.lock:
-        return jsonify({
+        return {
             "status": state.status,
-            "progress": state.progress,
+            "progress": int(state.progress),
             "data": state.student_data,
-            "is_near": state.is_near,
-            "is_live": state.is_live,
+            "is_near": bool(state.is_near),
+            "is_live": bool(state.is_live),
             "fas_score": float(state.fas_score),
-            "blink_count": state.blink_count
-        })
+            "blink_count": int(state.blink_count)
+        }
 
-@app.route('/api/action', methods=['POST'])
-def handle_action():
-    req = request.json
-    action = req.get('action') # 'confirm' or 'reject'
+class ActionRequest(BaseModel):
+    action: str
+
+@app.post("/api/action")
+async def handle_action(req: ActionRequest):
+    action = req.action
     
     if action == 'confirm':
-        # Logic Lưu điểm danh (Đã có)
         if state.student_data:
             sid = state.student_data['student_id']
-            
-            # --- TÍNH NĂNG TỰ HỌC (SELF-LEARNING) ---
-            # Lưu ảnh xác thực vào collected_faces/MSSV/ để định kỳ training lại
             try:
-                # Tạo folder riêng cho từng sinh viên
                 student_collect_dir = os.path.join("collected_faces", sid)
                 if not os.path.exists(student_collect_dir):
                     os.makedirs(student_collect_dir)
-                
-                # Format tên file: Timestamp.jpg
                 filename = f"{int(time.time())}.jpg"
                 save_path = os.path.join(student_collect_dir, filename)
-                
-                # Lưu ảnh xác thực (Sử dụng bản clean_snapshot sạch)
                 with state.lock:
                     target_image = state.clean_snapshot if state.clean_snapshot is not None else state.frame
                     if target_image is not None:
@@ -541,17 +473,23 @@ def handle_action():
                         print(f"📸 Đã lưu ảnh SẠCH vào folder tự học: {save_path}")
             except Exception as e:
                 print(f"⚠️ Lỗi lưu ảnh tự học: {e}")
-            # ----------------------------------------
-            
             print(f"CONFIRMED: {sid}")
     
-    # Reset state ngay lập tức
     with state.lock:
         state.status = "SCANNING"
         state.student_data = None
-        state.last_scan_time = time.time() + 0.5 # Delay 0.5s trước khi quét lại (Mượt hơn)
+        state.last_scan_time = time.time() + 0.5 
         
-    return jsonify({"success": True})
+    return {"success": True}
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+def main():
+    import uvicorn
+    try:
+        # Giảm log_level xuống 'error' để tránh làm phiền và giúp tắt nhanh hơn
+        uvicorn.run(app, host="0.0.0.0", port=5000, log_level="error")
+    except KeyboardInterrupt:
+        state.running = False
+        os._exit(0)
+
+if __name__ == "__main__":
+    main()

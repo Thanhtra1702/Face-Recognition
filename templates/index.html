@@ -8,7 +8,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap"
         rel="stylesheet">
     <script src="https://code.iconify.design/2/2.2.1/iconify.min.js"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='css/style.css') }}">
 </head>
 
 <body>
@@ -39,7 +39,7 @@
             <!-- Header: Branding & Clock -->
             <header class="info-header">
                 <div class="brand-zone">
-                    <img src="{{ url_for('static', filename='images/Logo_FPT_Education.png') }}" class="brand-logo"
+                    <img src="{{ url_for('static', path='images/Logo_FPT_Education.png') }}" class="brand-logo"
                         alt="FPT Logo"
                         onerror="this.style.display='none'; document.getElementById('fb-logo').style.display='block'">
                     <h2 id="fb-logo" style="display:none; color:#F26F21; margin:0; font-weight:800; font-size: 20px;">
@@ -137,7 +137,7 @@
         </div>
     </div>
 
-    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+    <script src="{{ url_for('static', path='js/script.js') }}"></script>
 </body>
 
 </html>
