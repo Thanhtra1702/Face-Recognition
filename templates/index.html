@@ -20,13 +20,11 @@
             <div class="live-feed">
                 <img src="/video_feed" id="video-feed" alt="Camera Stream">
 
-                <!-- Notification Overlay (Phủ lên camera bằng CSS) -->
+                <!-- Notification Overlay -->
                 <div id="distance-alert" class="notification-overlay hidden">
                     <span class="iconify" data-icon="mdi:human-greeting-proximity"></span>
                     <span>Vui lòng tiến lại gần Kiosk</span>
                 </div>
-                <!-- No manual overlay, backend will draw tracking box -->
-                <!-- Đã xóa Live Badge tại đây -->
             </div>
         </div>
 
@@ -76,57 +74,57 @@
                     </div>
                 </div>
 
-                View 2: Success & ID Card -->
-                < id="view-success" class="view-state hidden">
-                    <d class="status-badge success">
-                        <spn class="iconify" data-icon="mdi:check-decagram"></span>
-                            XÁCTHỰC THÀNH CÔNG
-        </div>
+                <!-- View 2: Success & ID Card -->
+                <div id="view-success" class="view-state hidden">
+                    <div class="status-badge success">
+                        <span class="iconify" data-icon="mdi:check-decagram"></span>
+                        XÁC THỰC THÀNH CÔNG
+                    </div>
 
-        <div class="id-card-modern">
-            class="card-head">
-            <el>HỌ VÀ TÊN SINH VIÊN</label>
-                <id="st-name">--</h3>
-                    </v>
-
-                    <di class="card-grid">
-                        <div class="grid-item">
-                            <label>MÃ SINH VIÊN</label>
-                            n id="st-id">--</span>
-                            <v>
-                                < class="grid-item">
-                                    <lel>LỚP / PHÒNG</label>
-                                        <sn id="st-class">--</span>
-                                            </dv>
-                                            <div class="grid-item full">
-                                                el>THỜI GIAN ĐIỂM DANH</label>
-                                                <n id="st-time">--</span>
-                                                    <v>
-                                                    </v>
-                            </v>
-
-                            <di class="action-buttons">
-                                <buton id="btn-confirm" class="btn btn-confirm">
-                                    <span class="iconify" data-icon="mdi:check-bold"></span>
-                                    NHẬN
-                                    <tton>
-                                        <bton id="btn-retry" class="btn btn-retry">
-                                            <sn class="iconify" data-icon="mdi:refresh"></span>
-                                                THỬLẠI
-                                                </btton>
+                    <div class="id-card-modern">
+                        <div class="card-head">
+                            <label>HỌ VÀ TÊN SINH VIÊN</label>
+                            <h3 id="st-name">--</h3>
                         </div>
+
+                        <div class="card-grid">
+                            <div class="grid-item">
+                                <label>MÃ SINH VIÊN</label>
+                                <span id="st-id">--</span>
+                            </div>
+                            <div class="grid-item">
+                                <label>LỚP / PHÒNG</label>
+                                <span id="st-class">--</span>
+                            </div>
+                            <div class="grid-item full">
+                                <label>THỜI GIAN ĐIỂM DANH</label>
+                                <span id="st-time">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="action-buttons">
+                        <button id="btn-confirm" class="btn btn-confirm">
+                            <span class="iconify" data-icon="mdi:check-bold"></span>
+                            XÁC NHẬN
+                        </button>
+                        <button id="btn-retry" class="btn btn-retry">
+                            <span class="iconify" data-icon="mdi:refresh"></span>
+                            THỬ LẠI
+                        </button>
+                    </div>
+                </div>
+
+            </main>
+
+            <footer class="info-footer">
+                <div class="system-meta">
+                    <span>FPT EDU • SMART KIOSK 2026</span>
+                    <span>FPT Quy Nhơn AI Campus</span>
+                </div>
+            </footer>
+
         </div>
-
-        </main>
-
-        <footer class="info-footer">
-            <div class="system-meta">
-                <span>FPT EDU • SMART KIOSK 2026</span>
-                <span>FPT Quy Nhơn AI Campus</span>
-            </div>
-        </footer>
-
-    </div>
     </div>
 
     <script src="{{ url_for('static', filename='js/script.js') }}"></script>
