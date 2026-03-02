@@ -5,4 +5,6 @@ tf-keras>=2.15.0
 qdrant-client
 Pillow>=9.0.0
 mediapipe==0.10.11
+onnxruntime==1.20.1
+onnx==1.17.0
 

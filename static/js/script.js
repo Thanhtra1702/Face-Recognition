@@ -24,7 +24,12 @@ const ui = {
 
     // Clock
     clock: document.getElementById('clock'),
-    date: document.getElementById('date')
+    date: document.getElementById('date'),
+
+    // Liveness
+    livenessBadge: document.getElementById('liveness-badge'),
+    livenessText: document.getElementById('liveness-text'),
+    blinkInstruction: document.getElementById('blink-instruction')
 };
 
 // 1. Clock Logic (HH:mm:ss)
@@ -88,7 +93,7 @@ function startPolling() {
             const data = await res.json();
             updateUI(data);
         } catch (e) { console.error("Polling error:", e); }
-    }, 200);
+    }, 100);
 }
 
 function updateUI(data) {
@@ -109,8 +114,35 @@ function updateUI(data) {
 
     if (status === "SCANNING") {
         switchView('SCANNING');
+
+        // Dual-Layer Feedback
+        if (data.is_near) {
+            ui.livenessBadge.style.display = 'flex';
+
+            if (data.is_live) {
+                ui.livenessBadge.classList.add('live');
+                const method = data.fas_score > 0.99 ? "AI PASSIVE" : "BLINK OK";
+                ui.livenessText.innerText = `LIVENESS: ${method}`;
+                ui.blinkInstruction.classList.add('hidden');
+            } else {
+                ui.livenessBadge.classList.remove('live');
+                ui.livenessText.innerText = `AI Confidence: ${(data.fas_score * 100).toFixed(1)}%`;
+
+                // Chỉ hiện "Yêu cầu nháy mắt" nếu AI chưa tin tưởng
+                if (data.fas_score <= 0.99) {
+                    ui.blinkInstruction.classList.remove('hidden');
+                } else {
+                    ui.blinkInstruction.classList.add('hidden');
+                }
+            }
+        } else {
+            ui.livenessBadge.style.display = 'none';
+            ui.blinkInstruction.classList.add('hidden');
+        }
     }
     else if (status === "CONFIRM") {
+        ui.livenessBadge.style.display = 'none';
+        ui.blinkInstruction.classList.add('hidden');
         if (studentData) {
             ui.stName.innerText = (studentData.name || "NGƯỜI LẠ").toUpperCase();
             ui.stId.innerText = studentData.student_id || "N/A";

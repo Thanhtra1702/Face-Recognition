@@ -96,6 +96,69 @@ body {
     }
 }
 
+/* Liveness & Blink Badge */
+.liveness-badge {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #FFF;
+    padding: 8px 16px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    font-weight: 700;
+    z-index: 101;
+    transition: all 0.3s ease;
+}
+
+.liveness-badge.live {
+    border-color: #2ECC71;
+    box-shadow: 0 0 15px rgba(46, 204, 113, 0.3);
+}
+
+.liveness-badge.live .iconify {
+    color: #2ECC71;
+}
+
+/* Blink Instruction in Info Side */
+.blink-instruction {
+    background: rgba(242, 111, 33, 0.1);
+    color: var(--fpt-orange);
+    padding: 15px;
+    border-radius: 12px;
+    margin-top: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    font-weight: 800;
+    font-size: 15px;
+    border: 2px dashed var(--fpt-orange);
+    animation: flash 1.5s infinite;
+}
+
+@keyframes flash {
+    0% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.7;
+        transform: scale(0.98);
+    }
+
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
 /* --- RIGHT: INFO (35%) --- */
 .info-section {
     flex: 35;

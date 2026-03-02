@@ -12,6 +12,7 @@ from qdrant_client import QdrantClient
 from kiosk_db import DatabaseHandler
 
 import mediapipe as mp
+import onnxruntime as ort
 
 import signal
 import sys
@@ -34,6 +35,33 @@ QDRANT_PATH = "./qdrant_db"
 COLLECTION_NAME = "student_faces"
 # qdrant_client = QdrantClient(path=QDRANT_PATH) # REMOVED to avoid double locking
 
+# --- ANTI-SPOOF MODULE ---
+class AntiSpoof:
+    def __init__(self, model_path="MiniFASNetV2.onnx"):
+        self.ort_session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+        self.input_name = self.ort_session.get_inputs()[0].name
+
+    def predict(self, face_img):
+        """Dự đoán liveness: Trả về score (càng cao càng giống người thật)"""
+        try:
+            # Resize về 80x80 theo chuẩn MiniFASNetV2
+            resized = cv2.resize(face_img, (80, 80))
+            # Chuẩn hóa (MiniFASNet dùng NCHW và chuẩn hóa cơ bản)
+            img = resized.astype(np.float32)
+            img = np.expand_dims(img, axis=0) # (1, 80, 80, 3)
+            img = np.transpose(img, (0, 3, 1, 2)) # (1, 3, 80, 80)
+            
+            ort_inputs = {self.input_name: img}
+            ort_outs = self.ort_session.run(None, ort_inputs)
+            # Output thường là Softmax [Fake, Real]
+            result = ort_outs[0][0]
+            exp_res = np.exp(result - np.max(result))
+            prob = exp_res / exp_res.sum()
+            return prob[1] # Xác suất là Real
+        except Exception as e:
+            print(f"AntiSpoof Error: {e}")
+            return 0.0
+
 # --- GLOBAL STATE ---
 class KioskState:
     def __init__(self):
@@ -46,11 +74,14 @@ class KioskState:
         self.last_scan_time = 0
         self.process_start_time = 0
         self.db = DatabaseHandler()
+        self.anti_spoof = AntiSpoof()
         self.running = True # Cờ kiểm soát vòng lặp
-        # Liveness Blink State
-        self.blink_counter = 0
-        self.is_blinking = False
-        self.last_blink_time = 0  
+        # Liveness State
+        self.is_live = False
+        self.fas_score = 0.0
+        self.blink_count = 0
+        self.last_blink_time = 0
+        self.blink_threshold = 0.20
         # Verification State
         self.consecutive_match_count = 0
         self.last_recognized_sid = None
@@ -117,13 +148,12 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
     try:
         input_frame = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
         
-        # --- 1. DETECT & EXTRACT FACE ---
+        # --- 1. DETECT & EXTRACT FACE (Khôi phục lại bước alignment chuẩn) ---
         face_objs = DeepFace.extract_faces(
             img_path=input_frame,
             detector_backend="mediapipe",
-            enforce_detection=False, # Đã crop sẵn nên không cần gắt gao detection
-            align=True,
-            grayscale=False
+            enforce_detection=False, 
+            align=True
         )
         
         if not face_objs:
@@ -199,7 +229,7 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
                     
                     print(f"🔄 Khớp lần {state.consecutive_match_count}/2 cho ID: {accepted_sid}")
                     
-                    # --- FAST PATH: Nếu score > 0.65, xác nhận ngay lập tức ---
+                    # --- FAST PATH: Khôi phục logic khớp 2 lần hoặc Score > 0.65 ---
                     is_very_sure = score > 0.65
                     
                     if state.consecutive_match_count >= 2 or is_very_sure:
@@ -321,6 +351,50 @@ def camera_worker():
             if best_face_data:
                 x_min, y_min, x_max, y_max = best_face_data
                 
+                # --- NEW: DUAL-LAYER ANTI-SPOOFING (MiniFASNet + Blink) ---
+                try:
+                    # Tầng 1: Passive (MiniFASNet)
+                    # Lấy vùng mặt để chạy AntiSpoof (Cần padding ít hơn để lấy texture)
+                    fas_pad = int((x_max - x_min) * 0.1)
+                    fx1, fy1 = max(0, x_min - fas_pad), max(0, y_min - fas_pad)
+                    fx2, fy2 = min(w, x_max + fas_pad), min(h, y_max + fas_pad)
+                    fas_face = raw_frame[fy1:fy2, fx1:fx2]
+                    
+                    if fas_face.size > 0:
+                        # Chỉ chạy AntiSpoof mỗi 3 frame hoặc khi chưa live để tiết kiệm CPU/Tăng FPS
+                        if not hasattr(state, '_fas_frame_counter'): state._fas_frame_counter = 0
+                        state._fas_frame_counter += 1
+                        
+                        if state._fas_frame_counter % 3 == 0 or not state.is_live:
+                            score = state.anti_spoof.predict(fas_face)
+                            with state.lock:
+                                state.fas_score = score
+                    
+                    # Tầng 2: Active (Blink Detection Fallback)
+                    face_landmarks = results.multi_face_landmarks[0]
+                    ear_left = calculate_ear(face_landmarks.landmark, LEFT_EYE, w, h)
+                    ear_right = calculate_ear(face_landmarks.landmark, RIGHT_EYE, w, h)
+                    ear = (ear_left + ear_right) / 2.0
+                    
+                    with state.lock:
+                        if ear < state.blink_threshold:
+                            if not hasattr(state, '_eye_closed'): state._eye_closed = True
+                        else:
+                            if hasattr(state, '_eye_closed') and state._eye_closed:
+                                state.blink_count += 1
+                                state._eye_closed = False
+                                state.last_blink_time = time.time()
+                        
+                        # LOGIC QUYẾT ĐỊNH (Dual Layer Gateway)
+                        # Option A: MiniFASNet cực tin tưởng (> 0.99)
+                        is_pass_fas = state.fas_score > 0.99
+                        # Option B: Có nháy mắt gần đây (trong 4 giây)
+                        is_pass_blink = (time.time() - state.last_blink_time < 4.0)
+                        
+                        state.is_live = is_pass_fas or is_pass_blink
+                except Exception as e:
+                    print(f"Liveness Logic Error: {e}")
+                
                 # --- DISTANCE FILTER (720p Optimized) ---
                 face_width = x_max - x_min
                 is_near_enough = face_width > 180 # Mở rộng khoảng cách (~2m - 2.5m)
@@ -346,8 +420,8 @@ def camera_worker():
                 cv2.line(frame, (x_max, y_max), (x_max - l, y_max), color, t)
                 cv2.line(frame, (x_max, y_max), (x_max, y_max - l), color, t)
                 
-                # Trigger Processing - CHỈ KHI ĐỦ GẦN
-                if is_near_enough and state.status == "SCANNING" and (current_time - state.last_scan_time > 1.0):
+                # Trigger Processing - CHỈ KHI ĐỦ GẦN VÀ QUA ĐƯỢC CỬA LIVENESS
+                if is_near_enough and state.is_live and state.status == "SCANNING" and (current_time - state.last_scan_time > 1.0):
                     # --- DIGITAL ZOOM (CROP FACE FOR AI) ---
                     # Cắt vùng mặt có thêm 40% padding để AI dễ nhận diện hơn từ xa
                     pad_w = int((x_max - x_min) * 0.4)
@@ -431,7 +505,10 @@ def get_status():
             "status": state.status,
             "progress": state.progress,
             "data": state.student_data,
-            "is_near": state.is_near
+            "is_near": state.is_near,
+            "is_live": state.is_live,
+            "fas_score": float(state.fas_score),
+            "blink_count": state.blink_count
         })
 
 @app.route('/api/action', methods=['POST'])
