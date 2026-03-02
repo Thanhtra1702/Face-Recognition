@@ -7,6 +7,8 @@ from qdrant_client import QdrantClient, models
 from qdrant_client.models import PointStruct
 import sys
 import datetime
+import sqlite3
+import random
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -246,6 +248,34 @@ def process_collected_images():
                     os.rmdir(parent_dir)
                 except: pass
                 
+            # 4. Tự động cập nhật thông tin vào SQLite (Cực kỳ quan trọng)
+            try:
+                conn = sqlite3.connect('student_info.db')
+                cursor = conn.cursor()
+                
+                # Kiểm tra xem sinh viên đã có trong hệ thống chưa
+                cursor.execute("SELECT id FROM students WHERE id = ?", (mssv,))
+                if cursor.fetchone() is None:
+                    # Nếu chưa có, tạo dữ liệu mẫu giống setup_database.py
+                    schedule_templates = [
+                        ('TMG301 (12:30-14:45)', '314'),
+                        ('SEG301 (12:30-14:45)', '318'),
+                        ('DPL302m (12:30-14:45)', '305'),
+                        ('IOT102 (07:30-09:45)', '205'),
+                        ('MAD101 (10:00-12:15)', '401')
+                    ]
+                    sched, room = random.choice(schedule_templates)
+                    name = f"Sinh viên {mssv}"
+                    
+                    cursor.execute("INSERT INTO students (id, name, schedule, room) VALUES (?, ?, ?, ?)", 
+                                (mssv, name, sched, room))
+                    conn.commit()
+                    print(f"📝 Đã thêm {mssv} vào SQLite database.")
+                
+                conn.close()
+            except Exception as db_err:
+                print(f"⚠️ Lỗi cập nhật SQLite: {db_err}")
+
             count_success += 1
 
         except Exception as e:

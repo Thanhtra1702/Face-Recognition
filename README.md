@@ -55,13 +55,16 @@ pip install -r requirements.txt
    python setup_database.py
    ```
 
-## 📸 Quy Trình Thêm/Cập Nhật Dữ Liệu
+### Quy trình nạp dữ liệu tự động (Smart Data Processing)
 
-### Tự học từ Kiosk (Smart Self-Learning)
-
-- Khi sinh viên điểm danh và bấm **Xác nhận**, hệ thống tự động lưu **Ảnh SẠCH** (không dính khung vẽ) vào `collected_faces/{MSSV}/`.
-- Chạy `python process_collected_faces.py` định kỳ để nạp dữ liệu mới.
-- **Lưu ý:** Ảnh sau khi xử lý sẽ được di chuyển vào thư mục `processed/` để đối soát thay vì bị xóa.
+- Khi sinh viên điểm danh và bấm **Xác nhận**, hệ thống tự động lưu **Ảnh SẠCH** vào `collected_faces/{MSSV}/`.
+- Chạy: `python process_collected_faces.py`
+- **Cơ chế thông minh:**
+  - **Tự động nhận diện & cắt khuôn mặt:** Sử dụng ArcFace + Mediapipe.
+  - **Auto-Update SQLite:** Nếu sinh viên mới chưa có trong `student_info.db`, script sẽ tự động tạo thông tin mẫu (tên, lịch học, phòng).
+  - **Auto-Update Qdrant:** Tạo x8 biến thể ảnh (Augmentation) để AI nhận diện nhạy hơn.
+  - **Smart Avatar:** Chỉ cập nhật ảnh đại diện trong thư mục `database/` nếu ảnh mới có chất lượng (độ phân giải) tốt hơn ảnh cũ.
+  - **Lưu trữ:** Ảnh gốc sau khi xử lý được di chuyển vào `collected_faces/processed/{MSSV}/` để đối soát.
 
 ## 🖥 Chạy Ứng Dụng Kiosk
 
