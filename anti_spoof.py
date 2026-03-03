@@ -27,12 +27,14 @@ def calculate_ear(landmarks, eye_indices, w, h):
 
 def preprocess_frame(frame):
     """
-    Sử dụng CLAHE để cân bằng độ tương phản, giúp AI nhận diện tốt hơn 
+    Khử nhiễu + CLAHE để cân bằng độ tương phản, giúp AI nhận diện tốt hơn.
+    Đồng bộ với init_qdrant.py và process_collected_faces.py.
     """
     try:
-        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        denoised = cv2.GaussianBlur(frame, (3, 3), 0)
+        lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         cl = clahe.apply(l)
         limg = cv2.merge((cl, a, b))
         return cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)

@@ -23,7 +23,7 @@ def preprocess_frame(frame):
         lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
         
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         cl = clahe.apply(l)
         
         limg = cv2.merge((cl, a, b))
@@ -50,13 +50,13 @@ def init_qdrant():
     )
 
     # Lấy danh sách ảnh
-    image_files = [f for f in os.listdir(IMAGE_DIR) if f.endswith(('.jpg', '.jpeg', '.png'))]
+    image_files = [f for f in os.listdir(IMAGE_DIR) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
     
     if not image_files:
         print("Không tìm thấy ảnh nào trong thư mục database!")
         return
 
-    print(f"Bắt đầu xử lý {len(image_files)} ảnh (Augmentation x8 variants)...")
+    print(f"Bắt đầu xử lý {len(image_files)} ảnh (Auto-Crop + Augmentation)...")
     
     points = []
     import uuid
@@ -66,35 +66,70 @@ def init_qdrant():
         img_path = os.path.join(IMAGE_DIR, filename)
         
         try:
-            # 1. Đọc và tiền xử lý ảnh (Đồng bộ với app.py)
+            # 1. Đọc và tiền xử lý ảnh
             img_raw = cv2.imread(img_path)
             if img_raw is None: continue
-            img = preprocess_frame(img_raw)
+            h_orig, w_orig = img_raw.shape[:2]
+            img_processed = preprocess_frame(img_raw)
             
-            # 2. Tạo các biến thể (Augmentation - Buff x8 để tăng độ chính xác)
-            # Dùng cv2.convertScaleAbs cho Brightness/Contrast
+            # 2. Extract aligned face (Dùng Mediapipe, fallback RetinaFace)
+            try:
+                face_objs = DeepFace.extract_faces(
+                    img_path=img_processed,
+                    detector_backend="mediapipe",
+                    enforce_detection=True,
+                    align=True
+                )
+            except:
+                face_objs = DeepFace.extract_faces(
+                    img_path=img_processed,
+                    detector_backend="retinaface",
+                    enforce_detection=True,
+                    align=True
+                )
+            
+            if not face_objs:
+                print(f"⚠️ Không phát hiện khuôn mặt trong {filename}")
+                continue
+            
+            # 3. TỰ ĐỘNG CẬP NHẬT ẢNH DATABASE (Smart Portrait Crop)
+            # Chúng ta crop từ img_raw để giữ chất lượng gốc, không lấy bản đã CLAHE
+            fa = face_objs[0]['facial_area']
+            p = 0.3 # 30% padding cho avatar thoáng
+            x1 = max(0, int(fa['x'] - fa['w'] * p))
+            y1 = max(0, int(fa['y'] - fa['h'] * p))
+            x2 = min(w_orig, int(fa['x'] + fa['w'] + fa['w'] * p))
+            y2 = min(h_orig, int(fa['y'] + fa['h'] + fa['h'] * p))
+            
+            portrait_img = img_raw[y1:y2, x1:x2]
+            if portrait_img.size > 0:
+                cv2.imwrite(img_path, portrait_img)
+            
+            # 4. Lấy aligned face (đã detect + align + CLAHE) để tạo vector
+            aligned_face = face_objs[0]['face']
+            if aligned_face.max() <= 1.0:
+                aligned_face = (aligned_face * 255).astype(np.uint8)
+            
+            # 5. Tạo các biến thể (Augmentation x8 trên aligned face)
             variants = [
-                ("orig", img),
-                ("flip", cv2.flip(img, 1)),
-                ("rot_p5", rotate_image(img, 5)),
-                ("rot_m5", rotate_image(img, -5)),
-                ("bright", cv2.convertScaleAbs(img, alpha=1.2, beta=30)), # Sáng hơn
-                ("dark", cv2.convertScaleAbs(img, alpha=0.8, beta=-20)),   # Tối hơn
-                ("contrast", cv2.convertScaleAbs(img, alpha=1.5, beta=0)), # Tương phản cao
-                ("blur", cv2.GaussianBlur(img, (3, 3), 0))                # Nhòe nhẹ (sensor noise)
+                ("orig", aligned_face),
+                ("flip", cv2.flip(aligned_face, 1)),
+                ("rot_p5", rotate_image(aligned_face, 5)),
+                ("rot_m5", rotate_image(aligned_face, -5)),
+                ("bright", cv2.convertScaleAbs(aligned_face, alpha=1.2, beta=30)),
+                ("dark", cv2.convertScaleAbs(aligned_face, alpha=0.8, beta=-20)),
+                ("contrast", cv2.convertScaleAbs(aligned_face, alpha=1.5, beta=0)),
+                ("blur", cv2.GaussianBlur(aligned_face, (3, 3), 0))
             ]
             
-            # 3. Tạo vector cho từng biến thể
+            # 6. Tạo vector và lưu vào Qdrant (detect_backend='skip')
             for var_name, var_img in variants:
                 try:
-                    # Chuyển sang RGB trước khi đưa vào DeepFace
-                    rgb_var = cv2.cvtColor(var_img, cv2.COLOR_BGR2RGB)
-                    
                     results = DeepFace.represent(
-                        img_path=rgb_var, 
+                        img_path=var_img, 
                         model_name=MODEL_NAME, 
-                        detector_backend="mediapipe",
-                        align=True,
+                        detector_backend="skip",
+                        align=False,
                         enforce_detection=False
                     )
                     

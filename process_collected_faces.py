@@ -24,7 +24,7 @@ def preprocess_frame(frame):
         denoised = cv2.GaussianBlur(frame, (3, 3), 0)
         lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         cl = clahe.apply(l)
         limg = cv2.merge((cl, a, b))
         final = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
@@ -55,7 +55,7 @@ def process_collected_images():
             continue
             
         for file in files:
-            if file.lower().endswith(('.jpg', '.png')):
+            if file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
                 image_files.append(os.path.join(root, file))
     
     if not image_files:
@@ -82,48 +82,48 @@ def process_collected_images():
         
         print(f"\n📸 Đang xử lý: {filename} (MSSV: {mssv})")
         
-        # 1. Đọc và Tiền xử lý (Đồng bộ với app.py)
+        # 1. Đọc ảnh gốc
         img_raw = cv2.imread(file_path)
         if img_raw is None:
             print("❌ Lỗi đọc ảnh.")
             continue
         
-        img = preprocess_frame(img_raw)
+        # Tạo bản CLAHE chỉ cho AI đọc (không ghi đè ảnh gốc)
+        img_for_ai = preprocess_frame(img_raw)
 
         try:
-            # ... (Phần Detection giữ nguyên) ...
-            # Detect & Crop (Sử dụng logic thông minh: Diện tích + Vị trí trung tâm)
+            # --- DETECT & EXTRACT FACE (Đồng bộ pipeline với recognition.py) ---
+            # Dùng extract_faces để lấy aligned face + facial_area
             try:
-                results = DeepFace.represent(
-                    img_path=img,
-                    model_name="ArcFace",
-                    enforce_detection=True,
+                face_objs = DeepFace.extract_faces(
+                    img_path=img_for_ai,
                     detector_backend="mediapipe",
+                    enforce_detection=True,
                     align=True
                 )
             except:
-                 results = DeepFace.represent(
-                    img_path=img,
-                    model_name="ArcFace",
+                # Nếu Mediapipe xịt, dùng RetinaFace (Cực kỳ chính xác cho ảnh tĩnh)
+                face_objs = DeepFace.extract_faces(
+                    img_path=img_for_ai,
+                    detector_backend="retinaface",
                     enforce_detection=True,
-                    detector_backend="opencv",
                     align=True
                 )
 
-            if not results:
+            if not face_objs:
                 print("❌ Không phát hiện khuôn mặt.")
                 continue
 
-            # Logic chọn khuôn mặt tốt nhất
-            img_height, img_width = img.shape[:2]
+            # Logic chọn khuôn mặt tốt nhất (Diện tích + Vị trí trung tâm)
+            img_height, img_width = img_raw.shape[:2]
             img_center_x = img_width / 2
             img_center_y = img_height / 2
             
-            best_face = None
+            best_face_obj = None
             best_score = -1
             
-            for face_data in results:
-                fa = face_data['facial_area']
+            for face_obj in face_objs:
+                fa = face_obj['facial_area']
                 area = fa['w'] * fa['h']
                 face_center_x = fa['x'] + fa['w'] / 2
                 face_center_y = fa['y'] + fa['h'] / 2
@@ -136,14 +136,19 @@ def process_collected_images():
                 
                 if total_score > best_score:
                     best_score = total_score
-                    best_face = face_data
+                    best_face_obj = face_obj
             
-            # Crop & Save
+            # Lấy aligned face cho AI (đã detect + align, đồng bộ recognition.py dòng 28-30)
+            aligned_face = best_face_obj['face']
+            if aligned_face.max() <= 1.0:
+                aligned_face = (aligned_face * 255).astype(np.uint8)
+            
+            # Crop & Save Avatar
             target_path = os.path.join(DATABASE_DIR, f"{mssv}.jpg")
             
-            # Tính toán vùng crop có padding
-            facial_area = best_face['facial_area']
-            padding = 0.2
+            # Tính toán vùng crop có padding (30% padding cho avatar thoáng và đẹp)
+            facial_area = best_face_obj['facial_area']
+            padding = 0.3
             x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
             x_pad, y_pad = int(w * padding), int(h * padding)
             x1 = max(0, x - x_pad)
@@ -151,7 +156,8 @@ def process_collected_images():
             x2 = min(img_width, x + w + x_pad)
             y2 = min(img_height, y + h + y_pad)
             
-            face_crop = img[y1:y2, x1:x2]
+            # Crop từ ảnh GỐC (không CLAHE) để lưu avatar đẹp tự nhiên
+            face_crop = img_raw[y1:y2, x1:x2]
             
             # --- LOGIC CHỌN ẢNH TỐT NHẤT (SMART AVATAR SELECTION) ---
             should_save_image = True
@@ -180,32 +186,30 @@ def process_collected_images():
                 print(f"✅ Đã lưu Avatar mới: {target_path}")
             # --------------------------------------------------------
 
-            # 2. Update Qdrant (Cơ chế Multi-Vector + Augmentation: Tạo x8 variants)
-            # Tạo các biến thể (Augmentation - Buff mạnh để tăng độ chính xác)
-            # Dùng cv2.convertScaleAbs cho Brightness/Contrast
+            # 2. Update Qdrant (Augmentation x8 trên aligned face)
+            # Dùng aligned_face (đã detect + align + CLAHE) cho augmentation
+            # Sau đó represent(skip) → đồng bộ hoàn toàn với recognition.py
             variants = [
-                ("orig", face_crop),
-                ("flip", cv2.flip(face_crop, 1)),
-                ("rot_p5", rotate_image(face_crop, 5)),
-                ("rot_m5", rotate_image(face_crop, -5)),
-                ("bright", cv2.convertScaleAbs(face_crop, alpha=1.2, beta=30)), # Sáng hơn
-                ("dark", cv2.convertScaleAbs(face_crop, alpha=0.8, beta=-20)),   # Tối hơn
-                ("contrast", cv2.convertScaleAbs(face_crop, alpha=1.5, beta=0)), # Tương phản cao
-                ("blur", cv2.GaussianBlur(face_crop, (3, 3), 0))                # Nhòe nhẹ
+                ("orig", aligned_face),
+                ("flip", cv2.flip(aligned_face, 1)),
+                ("rot_p5", rotate_image(aligned_face, 5)),
+                ("rot_m5", rotate_image(aligned_face, -5)),
+                ("bright", cv2.convertScaleAbs(aligned_face, alpha=1.2, beta=30)),
+                ("dark", cv2.convertScaleAbs(aligned_face, alpha=0.8, beta=-20)),
+                ("contrast", cv2.convertScaleAbs(aligned_face, alpha=1.5, beta=0)),
+                ("blur", cv2.GaussianBlur(aligned_face, (3, 3), 0))
             ]
             
             import uuid
             for var_name, var_img in variants:
                 try:
-                    # Chuyển sang RGB trước khi xử lý
-                    rgb_var = cv2.cvtColor(var_img, cv2.COLOR_BGR2RGB)
-                    
+                    # represent(skip): Không detect lại, đồng bộ với recognition.py
                     results_var = DeepFace.represent(
-                        img_path=rgb_var,
+                        img_path=var_img,
                         model_name="ArcFace",
                         enforce_detection=False,
-                        detector_backend="mediapipe",
-                        align=True
+                        detector_backend="skip",
+                        align=False
                     )
                     if results_var:
                         embedding = results_var[0]['embedding']
@@ -223,7 +227,7 @@ def process_collected_images():
                 except:
                     pass
             
-            print(f"✅ Đã thêm 4 variants vào Qdrant cho {mssv}.")
+            print(f"✅ Đã thêm 8 variants vào Qdrant cho {mssv}.")
 
             # 3. Lưu trữ: Di chuyển ảnh vào thư mục processed thay vì xóa (để đối soát)
             try:

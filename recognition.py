@@ -6,10 +6,27 @@ from deepface import DeepFace
 
 COLLECTION_NAME = "student_faces"
 
+def preprocess_frame(frame):
+    """Tiền xử lý ảnh (Khử nhiễu + Cân bằng sáng)"""
+    try:
+        # 1. Khử nhiễu nhẹ
+        denoised = cv2.GaussianBlur(frame, (3, 3), 0)
+        # 2. Cân bằng sáng (CLAHE)
+        lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) # Giảm xuống 2.0 cho tự nhiên
+        cl = clahe.apply(l)
+        limg = cv2.merge((cl, a, b))
+        return cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+    except:
+        return frame
+
 def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_max):
     """Xử lý nhận diện khuôn mặt bất đồng bộ"""
     try:
-        input_frame = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+        # --- 0. PREPROCESS ---
+        processed_crop = preprocess_frame(face_crop)
+        input_frame = cv2.cvtColor(processed_crop, cv2.COLOR_BGR2RGB)
         
         # --- 1. DETECT & EXTRACT FACE ---
         face_objs = DeepFace.extract_faces(

@@ -145,7 +145,7 @@ def camera_worker():
                     pad_h = int((y_max - y_min) * 0.4)
                     x1, y1 = max(0, x_min - pad_w), max(0, y_min - pad_h)
                     x2, y2 = min(w, x_max + pad_w), min(h, y_max + pad_h)
-                    face_crop = frame[y1:y2, x1:x2].copy()
+                    face_crop = raw_frame[y1:y2, x1:x2].copy()
                     
                     if face_crop.size > 0:
                         with state.lock:
