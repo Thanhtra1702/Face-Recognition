@@ -13,6 +13,7 @@ from pydantic import BaseModel
 # Import modules tự tạo
 from core_state import KioskState, setup_signals
 from anti_spoof import AntiSpoof, calculate_ear, preprocess_frame, LEFT_EYE, RIGHT_EYE, mp_face_mesh
+import recognition
 from recognition import run_recognition_async
 
 app = FastAPI()
@@ -35,36 +36,6 @@ try:
     print("✅ Model AI đã sẵn sàng!")
 except Exception as e:
     print(f"❌ Error preloading model: {e}")
-
-# --- AI HELPERS: ALIGNMENT ON CPU ---
-def get_affine_aligned_face(frame, landmarks, target_size=(112, 112)):
-    """Align khuôn mặt bằng toán học (Affine) dựa trên landmarks - CỰC NHANH"""
-    h, w = frame.shape[:2]
-    # Landmark idx Mediapipe cho tâm mắt
-    # Trái: 33, 133 -> trung tâm 468 landmarks
-    l_eye = np.mean([ (landmarks.landmark[33].x * w, landmarks.landmark[33].y * h), (landmarks.landmark[133].x * w, landmarks.landmark[133].y * h) ], axis=0)
-    r_eye = np.mean([ (landmarks.landmark[362].x * w, landmarks.landmark[362].y * h), (landmarks.landmark[263].x * w, landmarks.landmark[263].y * h) ], axis=0)
-    
-    dX = r_eye[0] - l_eye[0]
-    dY = r_eye[1] - l_eye[1]
-    angle = np.degrees(np.arctan2(dY, dX))
-    
-    # Giữ tỉ lệ mắt ở vị trí 35% chiều ngang
-    dist = np.sqrt(dX**2 + dY**2)
-    desired_dist = (0.7 - 0.3) * target_size[0]
-    scale = desired_dist / dist
-    
-    eye_center = ( (l_eye[0] + r_eye[0]) // 2, (l_eye[1] + r_eye[1]) // 2 )
-    M = cv2.getRotationMatrix2D(eye_center, angle, scale)
-    
-    # Điều chỉnh dịch chuyển để mắt nằm ở hàng 35% chiều dọc
-    tX = target_size[0] * 0.5
-    tY = target_size[1] * 0.35
-    M[0, 2] += (tX - eye_center[0])
-    M[1, 2] += (tY - eye_center[1])
-    
-    aligned_face = cv2.warpAffine(frame, M, (target_size[0], target_size[1]), flags=cv2.INTER_CUBIC)
-    return aligned_face
 
 # --- CAMERA THREAD ---
 def camera_worker():
@@ -241,8 +212,8 @@ def camera_worker():
                    state.status == "SCANNING" and (stable_duration > 0.8) and \
                    (current_time - state.last_scan_time > 0.5):
                     
-                    # ALIGN TRỰC TIẾP BẰNG CPU TẠI ĐÂY
-                    aligned_crop = get_affine_aligned_face(raw_frame, cached_landmarks)
+                    # ALIGN TRỰC TIẾP BẰNG CPU TẠI ĐÂY (SOTA Alignment)
+                    aligned_crop = recognition.get_standard_aligned_face(raw_frame, cached_landmarks.landmark)
                     
                     if aligned_crop.size > 0:
                         with state.lock:

@@ -12,39 +12,42 @@ def is_blurry(image, threshold=60): # Tăng nhẹ ngưỡng để lọc gắt h�
     variance = cv2.Laplacian(gray, cv2.CV_64F).var()
     return variance < threshold, variance
 
-def get_aligned_face(frame, landmarks, target_size=(112, 112)):
+def get_standard_aligned_face(frame, landmarks, target_size=(112, 112)):
     """
-    Sử dụng 468 landmarks của Mediapipe để align khuôn mặt cực nhanh bằng Affine Transform.
-    Giúp bỏ qua bước DeepFace.extract_faces (tiết kiệm 100-200ms).
+    Standard Face Alignment (Affine Transform) mapping 5 landmarks to 112x112 template.
+    This is the standard for ArcFace/InsightFace to achieve SOTA accuracy.
     """
     h, w = frame.shape[:2]
     
-    # Lấy tọa độ mắt trái và mắt phải (trung tâm)
-    #landmark idx: mắt trái (33, 133), mắt phải (362, 263)
-    left_eye = np.mean([ (landmarks[33].x * w, landmarks[33].y * h), (landmarks[133].x * w, landmarks[133].y * h) ], axis=0)
-    right_eye = np.mean([ (landmarks[362].x * w, landmarks[362].y * h), (landmarks[263].x * w, landmarks[263].y * h) ], axis=0)
+    # 1. Trích xuất 5 điểm landmarks chính
+    # Mắt trái, Mắt phải, Mũi, Khóe miệng trái, Khóe miệng phải
+    l_eye = np.mean([ (landmarks[33].x * w, landmarks[33].y * h), (landmarks[133].x * w, landmarks[133].y * h) ], axis=0)
+    r_eye = np.mean([ (landmarks[362].x * w, landmarks[362].y * h), (landmarks[263].x * w, landmarks[263].y * h) ], axis=0)
+    nose = (landmarks[1].x * w, landmarks[1].y * h)
+    l_mouth = (landmarks[61].x * w, landmarks[61].y * h)
+    r_mouth = (landmarks[291].x * w, landmarks[291].y * h)
     
-    # Tính góc xoay
-    dY = right_eye[1] - left_eye[1]
-    dX = right_eye[0] - left_eye[0]
-    angle = np.degrees(np.arctan2(dY, dX))
+    src = np.array([l_eye, r_eye, nose, l_mouth, r_mouth], dtype=np.float32)
     
-    # Tính tâm giữa 2 mắt
-    eye_center = ( (left_eye[0] + right_eye[0]) // 2, (left_eye[1] + right_eye[1]) // 2 )
+    # 2. Template tọa độ chuẩn cho ArcFace (112x112)
+    dst = np.array([
+        [30.2946, 51.6963], # L-Eye
+        [65.5318, 51.5014], # R-Eye
+        [48.0252, 71.7366], # Nose
+        [33.5493, 92.3655], # L-Mouth
+        [62.7299, 92.2041]  # R-Mouth
+    ], dtype=np.float32)
     
-    # Ma trận xoay
-    M = cv2.getRotationMatrix2D(eye_center, angle, 1.0)
+    # 3. Tính toán Ma trận Affine
+    M, _ = cv2.estimateAffinePartial2D(src, dst)
+    if M is None:
+        return cv2.resize(frame, target_size)
     
-    # Xoay toàn bộ frame để mặt thẳng đứng
-    rotated = cv2.warpAffine(frame, M, (w, h), flags=cv2.INTER_CUBIC)
-    
-    # Crop lại vùng mặt từ frame đã xoay
-    # Sử dụng bounding box đã có nhưng lấy rộng ra một chút
-    # (Để đơn giản, trong bước này recognition.py sẽ nhận ảnh đã được align từ app.py)
-    return rotated
+    aligned = cv2.warpAffine(frame, M, target_size, borderMode=cv2.BORDER_CONSTANT)
+    return aligned
 
 def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_max):
-    """Xử lý nhận diện khuôn mặt SIÊU TỐC"""
+    """Xử lý nhận diện khuôn mặt SOTA Accuracy"""
     try:
         # --- 0. SHARPNESS CHECK ---
         blurry, val = is_blurry(face_crop)
@@ -52,33 +55,44 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
             with state.lock: state.status = "SCANNING"
             return
         
-        # --- 1. PREPARE IMAGE ---
-        # face_crop lúc này đã được app.py align sơ bộ hoặc là crop chất lượng cao
-        input_img = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+        # --- 1. TEST-TIME AUGMENTATION (TTA) - SOTA TECHNIQUE ---
+        # Chúng ta tạo 3 phiên bản ảnh để lấy embedding trung bình -> Cực kỳ ổn định
+        img_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+        img_rgb = cv2.resize(img_rgb, (112, 112))
         
-        # Resize về đúng chuẩn ArcFace (112x112)
-        input_img = cv2.resize(input_img, (112, 112))
-
-        # --- 2. GET EMBEDDING (detector='skip' is the key for speed) ---
-        results = DeepFace.represent(
-            img_path=input_img,
-            model_name="ArcFace",
-            detector_backend="skip",
-            enforce_detection=False,
-            align=False # Đã tự align bên ngoài hoặc skip để nhanh
-        )
+        # Phiên bản 2: CLAHE (Handle shadows)
+        lab = cv2.cvtColor(face_crop, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        cl = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(l)
+        img_clahe = cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2RGB)
+        img_clahe = cv2.resize(img_clahe, (112, 112))
         
-        if not results: 
+        # Phiên bản 3: Bright (Handle low light)
+        img_bright = cv2.convertScaleAbs(img_rgb, alpha=1.2, beta=10)
+        
+        variants = [img_rgb, img_clahe, img_bright]
+        embeddings = []
+        
+        for var_img in variants:
+            res = DeepFace.represent(img_path=var_img, model_name="ArcFace", detector_backend="skip", align=False)
+            if res:
+                # Chuẩn hóa vector (L2 Normalize) - Quan trọng cho Cosine
+                vec = np.array(res[0]["embedding"])
+                vec = vec / (np.linalg.norm(vec) + 1e-6)
+                embeddings.append(vec)
+        
+        if not embeddings:
             with state.lock: state.status = "SCANNING"
             return
             
-        embedding = results[0]["embedding"]
+        # 2. AVG EMBEDDING (Robust Vector)
+        final_embedding = np.mean(embeddings, axis=0).tolist()
         
-        # --- 3. SEARCH DATABASE (Top-3 for speed) ---
+        # --- 3. SEARCH DATABASE (Limit 5 for Voting) ---
         search_res = state.db.client.query_points(
             collection_name=COLLECTION_NAME,
-            query=embedding,
-            limit=3
+            query=final_embedding,
+            limit=5
         ).points
         
         found = False
@@ -87,7 +101,7 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
             score = best_match.score
             current_sid = best_match.payload['student_id']
             
-            # --- CONSENSUS VOTING ---
+            # --- ADVANCED CONSENSUS LOGIC ---
             votes = {}
             for res in search_res:
                 sid = res.payload['student_id']
@@ -96,20 +110,20 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
             top_voter = max(votes, key=votes.get)
             vote_count = votes[top_voter]
             
-            # Tính Gap với người khác
+            # Gap Check (với người khác - competitor)
             competitor_score = 0
-            for res in search_res[1:]:
+            for res in search_res:
                 if res.payload['student_id'] != current_sid:
                     competitor_score = res.score
                     break
             gap = score - competitor_score if competitor_score > 0 else 1.0
 
             accepted_sid = None
-            # Ngưỡng tối ưu: 0.50
-            if score > 0.50 and (current_sid == top_voter) and (vote_count >= 2):
-                # Kiểm tra Ambiguity Gap gắt hơn cho các trường hợp điểm thấp
-                if score < 0.65 and gap < 0.03:
-                    print(f"⚠️ Nhập nhằng (Gap: {gap:.4f}) - Bỏ qua")
+            # SOTA Threshold: Nâng ngưỡng lên 0.55 cho ổn định
+            if score > 0.55 and (current_sid == top_voter) and (vote_count >= 2):
+                # Gap Protection: Nếu điểm thấp (<0.70) thì Gap phải rõ rệt (>0.05)
+                if score < 0.70 and gap < 0.05:
+                    print(f"⚠️ Nhập nhằng (Gap: {gap:.4f}) - Đang tìm người tốt nhất...")
                 else:
                     accepted_sid = current_sid
             
@@ -121,12 +135,12 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
                         state.last_recognized_sid = accepted_sid
                         state.consecutive_match_count = 1
                     
-                    # CỰC NHANH: Fast pass > 0.72 + Consensus 3/3
-                    is_very_sure = (score > 0.72) and (vote_count >= 3)
+                    # SOTA FAST PASS: Score cao (0.75) + Đa số áp đảo (3/5)
+                    is_very_sure = (score > 0.75) and (vote_count >= 3)
                     required_matches = 2 
                     
                     if state.consecutive_match_count >= required_matches or is_very_sure:
-                        print(f"✅ [{accepted_sid}] Score: {score:.3f} | Gap: {gap:.3f} | Votes: {vote_count} {'(FAST)' if is_very_sure else ''}")
+                        print(f"✅ [{accepted_sid}] Score: {score:.3f} | Gap: {gap:.3f} | Votes: {vote_count}/5 {'(SOTA FAST)' if is_very_sure else ''}")
                         
                         name, sch, room = state.db.get_student_info(accepted_sid)
                         state.student_data = {
@@ -142,16 +156,15 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
                     else:
                         state.status = "PROCESSING"; state.progress = 95; found = True
             else:
-                # Log lý do từ chối để debug nhanh
-                if score > 0.50:
-                    print(f"❌ Rejected {current_sid}: Score={score:.3f}, Votes={vote_count}, Gap={gap:.3f}")
+                if score > 0.45:
+                    print(f"❌ Rejected {current_sid}: Score={score:.3f}, Votes={vote_count}/5, Gap={gap:.3f}")
 
         if not found:
             with state.lock: state.status = "SCANNING"; state.progress = 0
 
     except Exception as e:
-        print(f"🔥 AI Exception: {e}")
+        print(f"🔥 SOTA AI Exception: {e}")
         with state.lock: state.status = "SCANNING"
     
     if state.status == "PROCESSING":
-        with state.lock: state.process_start_time = time.time() - 0.4 
+        with state.lock: state.process_start_time = time.time() - 0.4

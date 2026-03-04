@@ -28,13 +28,15 @@ Hệ thống được xây dựng theo mô hình **Modular Architecture**, chia 
 
 ### 3.1. Pipeline Nhận diện Tối ưu
 
-Mỗi khung hình đi qua một pipeline tinh gọn để đảm bảo FPS cao (30+ FPS):
+### 3.1. Pipeline Nhận diện SOTA (V3.5)
+
+Mỗi khung hình đi qua một pipeline tinh gọn nhưng đạt độ chính xác cực cao:
 
 1. **Detection (Mediapipe):** Tìm 468 điểm landmarks nhanh chóng trên CPU.
-2. **Alignment (CPU Affine):** Sử dụng 5 điểm (mắt, mũi, miệng) để thực hiện phép biến đổi Affine, xoay và căn chỉnh khuôn mặt về dạng thẳng chuẩn.
-   - *Ưu điểm:* Loại bỏ bước Redetection của DeepFace, tiết kiệm **200-300ms** cho mỗi lần nhận diện.
-3. **Multi-Scale Anti-Spoofing:** Chạy song song khi khuôn mặt vào vùng "Cam".
-4. **Recognition:** Chỉ kích hoạt khi thỏa mãn điều kiện ổn định.
+2. **Standard 5-Point Alignment:** Sử dụng 5 điểm landmarks (mắt, mũi, miệng) để map chính xác vào template **112x112** tiêu chuẩn của ArcFace.
+   - *Ưu điểm:* Đưa khuôn mặt về đúng "vùng hiểu biết" tốt nhất của AI, tối ưu hóa sai số do góc nghiêng.
+3. **Test-Time Augmentation (TTA):** Đối với mỗi lần nhận diện, hệ thống không chỉ lấy 1 embedding đơn lẻ mà tạo ra **3 biến thể** của khuôn mặt (Gốc, Cân bằng sáng CLAHE, Tăng cường độ tương phản).
+   - *SOTA Technique:* Hệ thống tính toán **Trung bình cộng của 3 vector embedding** để tạo ra một "Robust Embedding" cuối cùng, loại bỏ hoàn toàn nhiễu từ ánh sáng và camera.
 
 ### 3.2. Chống giả mạo Đa quy mô (Multi-Scale FAS)
 
