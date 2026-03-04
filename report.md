@@ -9,7 +9,7 @@
 
 ## Abstract
 
-Bài báo cáo kỹ thuật này trình bày chi tiết về việc thiết kế và triển khai một hệ thống điểm danh sinh viên tự động dựa trên nhận diện khuôn mặt thời gian thực. Hệ thống kết hợp mô hình **ArcFace** để trích xuất đặc trưng khuôn mặt, cơ sở dữ liệu vector **Qdrant** để tìm kiếm nhanh, và cơ chế chống giả mạo hai tầng (**MiniFASNetV2** + **Blink Detection**) nhằm ngăn chặn các hình thức gian lận. Toàn bộ hệ thống chạy trên nền tảng **FastAPI** với kiến trúc module hóa, đạt tốc độ xử lý dưới 2 giây cho mỗi lượt điểm danh.
+Hệ thống kết hợp mô hình **ArcFace** để trích xuất đặc trưng khuôn mặt, cơ sở dữ liệu vector **Qdrant** để tìm kiếm nhanh, cơ chế bình chọn đa số (**Top-K Consensus Voting**), và cơ chế chống giả mạo hai tầng (**MiniFASNetV2** + **Blink Detection**) nhằm ngăn chặn các hình thức gian lận. Toàn bộ hệ thống chạy trên nền tảng **FastAPI** với kiến trúc module hóa, đạt tốc độ xử lý dưới 2 giây cho mỗi lượt điểm danh với độ chính xác ưu tiên hàng đầu.
 
 ---
 
@@ -38,7 +38,7 @@ Hệ thống được thiết kế cho môi trường giáo dục (trường đ�
 
 Hệ thống được thiết kế theo mô hình **Modular Architecture**, tách biệt rõ ràng các thành phần xử lý:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                        CLIENT (Browser)                     │
 │                   HTML/JS + Jinja2 Templates                │
@@ -87,7 +87,7 @@ Hệ thống được thiết kế theo mô hình **Modular Architecture**, tác
 
 Mỗi frame từ camera đi qua pipeline sau:
 
-```
+```text
 Camera (720p) ──► Face Detection (Mediapipe) ──► Liveness Check ──► Recognition ──► Result
                          │                           │                    │
                     Tìm khuôn mặt              Người thật?          Ai đây?
@@ -105,7 +105,7 @@ Mediapipe cung cấp 468 điểm landmark trên khuôn mặt. Hệ thống sử 
 1. **Xác định bounding box:** Tính tọa độ `(x_min, y_min, x_max, y_max)` bao quanh khuôn mặt.
 2. **Chọn khuôn mặt chính (Focus Score):** Khi có nhiều người trong khung hình, hệ thống chọn khuôn mặt có **diện tích lớn nhất** và **gần tâm màn hình nhất** bằng công thức:
 
-   ```
+   ```text
    focus_score = face_area / (distance_to_center + 1)
    ```
 
@@ -140,7 +140,7 @@ Mediapipe cung cấp 468 điểm landmark trên khuôn mặt. Hệ thống sử 
 - **Công cụ:** Mediapipe Face Mesh cung cấp các landmarks cụ thể quanh mắt.
 - **Thuật toán:** Eye Aspect Ratio (EAR)
 
-  ```
+  ```text
   EAR = (||p2 - p6|| + ||p3 - p5||) / (2 × ||p1 - p4||)
   ```
 
@@ -156,7 +156,7 @@ Mediapipe cung cấp 468 điểm landmark trên khuôn mặt. Hệ thống sử 
 
 - **Kết hợp hai tầng:** Hệ thống xác nhận "người thật" nếu **một trong hai điều kiện** sau thỏa mãn:
 
-  ```
+  ```text
   is_live = (fas_score > 0.99) OR (thời gian từ lần nháy mắt cuối < 4 giây)
   ```
 
@@ -205,19 +205,21 @@ Thay vì so sánh vector mới với **tất cả** vector trong database (Brute
 
 Hệ thống không chỉ lấy kết quả Top-1 mà áp dụng nhiều lớp kiểm tra:
 
-1. **Ngưỡng tối thiểu (Threshold = 0.45):** Score dưới 0.45 → từ chối ngay, khuôn mặt không khớp với ai.
-2. **Fast Pass (Score > 0.65):** Score rất cao → xác nhận ngay lập tức mà không cần chờ thêm.
-3. **Consecutive Match (0.45 < Score < 0.65):** Score trung bình → yêu cầu nhận diện **2 lần liên tiếp** cùng một kết quả trước khi xác nhận. Điều này giảm thiểu rủi ro nhận nhầm do nhiễu ảnh.
-4. **Ambiguity Check:** So sánh score của Top-1 với Top-2. Nếu hai người khác nhau nhưng score chênh lệch < 0.02, hệ thống từ chối xác nhận để tránh nhầm lẫn.
+1. **Ngưỡng tối thiểu (Threshold = 0.55):** Score dưới 0.55 → từ chối ngay, khuôn mặt không khớp với ai hoặc độ tương đồng quá thấp.
+2. **Fast Pass (Score > 0.75):** Score cực cao → xác nhận ngay lập tức.
+3. **Consecutive Match (0.55 < Score < 0.75):** Score trung bình → yêu cầu nhận diện **3 lần liên tiếp** cùng một kết quả trước khi xác nhận.
+4. **Top-K Consensus Voting:** Truy vấn Top-5 kết quả gần nhất. Một danh tính chỉ được chấp nhận khi nó đạt đa số phiếu bầu (Majority) trong Top-5.
+5. **Ambiguity Check:** So sánh score của Top-1 với Top-2 (khác ID). Nếu chênh lệch < 0.05 và điểm số chưa đạt mức Fast Pass, hệ thống từ chối để tránh rủi ro nhận nhầm.
 
 **Bảng tóm tắt logic:**
 
 | Điều kiện | Hành động | Lý do |
 | :--- | :--- | :--- |
-| Score < 0.45 | ❌ Từ chối | Không đủ giống bất kỳ ai |
-| Score > 0.65 | ✅ Xác nhận ngay | Độ tin cậy rất cao |
-| 0.45 < Score < 0.65 | ⏳ Chờ khớp lần 2 | Cần xác minh thêm |
-| Gap(Top1 - Top2) < 0.02 | ❌ Từ chối | Hai người quá giống nhau, rủi ro nhầm |
+| Score < 0.55 | ❌ Từ chối | Không đủ giống bất kỳ ai |
+| Score > 0.75 | ✅ Xác nhận ngay | Độ tin cậy cực cao |
+| 0.55 < Score < 0.75 | ⏳ Chờ khớp lần 3 | Cần xác minh độ ổn định |
+| Gap(Top1 - Top2) < 0.05 | ❌ Từ chối | Nhập nhằng giữa 2 người khác nhau |
+| No Consensus (Votes < 2) | ❌ Từ chối | Kết quả tìm kiếm bị phân tán (nhiễu) |
 
 **Cách hiểu đơn giản:** AI không bao giờ "đoán bừa". Nếu nó không chắc chắn, nó thà nói "Tôi chưa nhận ra bạn, hãy thử lại" còn hơn là nói sai tên bạn. Đây là triết lý thiết kế cốt lõi: **an toàn hơn là tiện lợi**.
 
@@ -260,7 +262,7 @@ Script này chạy offline (không phải real-time) để:
 2. Áp dụng GaussianBlur + CLAHE (đồng bộ với real-time).
 3. Dùng `DeepFace.extract_faces(mediapipe, align=True)` để detect và align khuôn mặt — **đồng bộ hoàn toàn với pipeline real-time** trong `recognition.py`.
 4. **Lưu avatar** từ ảnh gốc (không CLAHE) vào `database/` để giữ màu tự nhiên.
-5. Áp dụng **Data Augmentation** (xoay ±5°, thay đổi sáng/tối/tương phản, lật ngang, blur nhẹ) trên aligned face → tạo **8 biến thể**.
+5. Áp dụng **Data Augmentation (Rút gọn)**: Chỉ giữ lại 4 biến thể chất lượng cao (Gốc, Lật ngang, Sáng nhẹ, Tối nhẹ). Loại bỏ các biến thể Xoay/Mờ/Tương phản cao vì chúng tạo ra nhiễu vector.
 6. Trích xuất embedding bằng `DeepFace.represent(skip)` và cập nhật vào Qdrant.
 
 ---
@@ -289,9 +291,11 @@ Hệ thống được thiết kế để việc quản lý dữ liệu trở nê
 | FAS Threshold | 0.99 | Chỉ chấp nhận khi tin chắc 99% là người thật |
 | Blink EAR Threshold | 0.20 | Ngưỡng phát hiện mắt nhắm |
 | Blink Validity Window | 4 giây | Nháy mắt phải xảy ra trong 4 giây gần nhất |
-| Recognition Threshold | 0.45 (min) / 0.65 (fast pass) | Cân bằng giữa tốc độ và độ chính xác |
-| Ambiguity Gap | 0.02 | Khoảng cách tối thiểu giữa Top-1 và Top-2 |
-| Consecutive Match Required | 2 lần | Số lần khớp liên tiếp cần thiết (khi score trung bình) |
+| Recognition Threshold | 0.55 (min) / 0.75 (fast pass) | Cân bằng giữa tốc độ và độ chính xác |
+| Ambiguity Gap | 0.05 | Khoảng cách tối thiểu giữa Top-1 và Top-2 |
+| Consecutive Match Required | 3 lần | Số lần khớp liên tiếp cần thiết (khi score trung bình) |
+| Search Limit (K) | 5 | Dùng cho Consensus Voting |
+| Augmentation Variants | 4 | Chỉ giữ lại các biến thể chất lượng cao |
 | CLAHE clipLimit | 2.0 | Cân bằng sáng tối ưu cho chân dung |
 | CLAHE tileGridSize | 8 × 8 | Kích thước ô lưới cho CLAHE |
 | Face Min Width | 180 pixels | Kích thước tối thiểu khuôn mặt để kích hoạt nhận diện |
@@ -302,7 +306,7 @@ Hệ thống được thiết kế để việc quản lý dữ liệu trở nê
 
 ## 7. Luồng Xử Lý Real-Time Chi Tiết (Detailed Runtime Flow)
 
-```
+```text
 [Camera Thread - Chạy liên tục]
 │
 ├── 1. Capture frame (1280x720, flip ngang)
@@ -326,13 +330,14 @@ Hệ thống được thiết kế để việc quản lý dữ liệu trở nê
 │       ├── Áp dụng GaussianBlur + CLAHE preprocessing
 │       └── Gửi sang Recognition Thread (async)
 │
-└── 6. [Recognition Thread - Bất đồng bộ]
+        ├── 5. [Recognition Thread - Bất đồng bộ]
         ├── DeepFace.extract_faces (Mediapipe, align=True)
         ├── DeepFace.represent (ArcFace, 512-D embedding)
-        ├── Qdrant query (Top-3 kết quả)
-        ├── Ambiguity Check (Gap >= 0.02?)
-        ├── Threshold Check (Score > 0.45?)
-        ├── Consecutive Match Check (2 lần liên tiếp?)
+        ├── Qdrant query (Top-5 kết quả cho Voting)
+        ├── Consensus Check (Có đa số phiếu bầu?)
+        ├── Ambiguity Check (Gap >= 0.05?)
+        ├── Threshold Check (Score > 0.55?)
+        ├── Consecutive Match Check (3 lần liên tiếp?)
         │
         ├── ✅ CONFIRM → Hiển thị khung XANH LÁ + thông tin SV
         │       └── Lưu Clean Snapshot → collected_faces/
@@ -374,4 +379,4 @@ Hệ thống AI Kiosk đã đạt được sự cân bằng giữa **bảo mật
 
 ---
 
-*Technical Report — Generated: March 3, 2026*
+Technical Report — Generated: March 4, 2026

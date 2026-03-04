@@ -70,10 +70,12 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
         embedding = results[0]["embedding"]
         
         # --- 3. SEARCH DATABASE ---
+        # Tăng limit lên 5 để consensus voting (bình chọn đa số)
+        search_limit = 5
         search_res = state.db.client.query_points(
             collection_name=COLLECTION_NAME,
             query=embedding,
-            limit=5
+            limit=search_limit
         ).points
         
         found = False
@@ -81,64 +83,44 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
             best_match = search_res[0]
             score = best_match.score
             current_sid = best_match.payload['student_id']
+            print(f"🎯 Top 1: {current_sid} - Score: {score:.4f}")
             
-            # Log top-K results for debugging
-            for i, res in enumerate(search_res):
-                print(f"  #{i+1}: {res.payload['student_id']} (var: {res.payload.get('variant','?')}) - Score: {res.score:.4f}")
-            
-            accepted_sid = None
-            SCORE_THRESHOLD = 0.45
-            
-            # --- STEP A: Count votes (consensus) ---
-            sid_votes = {}
+            # --- CONSENSUS VOTING ---
+            # Đếm số lần mỗi ID xuất hiện trong Top Top-K
+            votes = {}
             for res in search_res:
                 sid = res.payload['student_id']
-                sid_votes[sid] = sid_votes.get(sid, 0) + 1
+                votes[sid] = votes.get(sid, 0) + 1
             
-            my_votes = sid_votes.get(current_sid, 0)
-            total_results = len(search_res)
+            top_voter = max(votes, key=votes.get)
+            vote_count = votes[top_voter]
             
-            # Find strongest competitor
+            accepted_sid = None
+            # Ngưỡng mới: 0.55 thay vì 0.45
+            is_passing_score = score > 0.55
+            is_ambiguous = False
+            
+            # Gap Check: So sánh với người khác (competitor)
             competitor_score = 0
-            competitor_sid = None
             for res in search_res[1:]:
                 if res.payload['student_id'] != current_sid:
                     competitor_score = res.score
-                    competitor_sid = res.payload['student_id']
                     break
-            gap = score - competitor_score if competitor_score > 0 else 1.0
             
-            print(f"  📊 Votes: {current_sid}={my_votes}/{total_results} | Gap: {gap:.4f} | Competitor: {competitor_sid}")
+            if competitor_score > 0:
+                gap = score - competitor_score
+                # Ngưỡng gap mới: 0.05 và score < 0.70
+                if gap < 0.05 and score < 0.70: 
+                    is_ambiguous = True
+                    print(f"⚠️ Nhập nhằng giữa {current_sid} và người khác (Gap: {gap:.4f})")
             
-            # --- STEP B: Decision logic ---
-            reject_reason = None
+            # Consensus Check: ID đạt score cao nhất phải là ID có đa số vote
+            is_consensus_met = (current_sid == top_voter) and (vote_count >= 2)
+            if vote_count == 1 and score < 0.70:
+                is_consensus_met = False # Match quá yếu, chỉ có 1 variant khớp
             
-            # B1: Score too low → always reject
-            if score < SCORE_THRESHOLD:
-                reject_reason = f"low_score({score:.4f}<{SCORE_THRESHOLD})"
-            
-            # B2: Consensus disagrees with top score → reject
-            elif total_results >= 3:
-                top_vote_sid = max(sid_votes, key=sid_votes.get)
-                if top_vote_sid != current_sid and sid_votes[top_vote_sid] >= 3:
-                    reject_reason = f"consensus_disagree(top={current_sid}, majority={top_vote_sid} {sid_votes[top_vote_sid]}/{total_results})"
-            
-            # B3: Strong consensus (>=3 votes) → SKIP ambiguity, accept
-            #     This is the key fix: 4/5 votes for same person = confident match
-            if reject_reason is None and my_votes >= 3:
+            if is_passing_score and not is_ambiguous and is_consensus_met:
                 accepted_sid = current_sid
-                print(f"🎯 ACCEPTED (strong consensus {my_votes}/{total_results}): {accepted_sid} (Score: {score:.4f})")
-            
-            # B4: Weak consensus (1-2 votes) → apply ambiguity check
-            elif reject_reason is None:
-                if gap < 0.03 and score < 0.60:
-                    reject_reason = f"ambiguous(votes={my_votes}/{total_results}, gap={gap:.4f})"
-                else:
-                    accepted_sid = current_sid
-                    print(f"🎯 ACCEPTED (gap ok): {accepted_sid} (Score: {score:.4f}, Gap: {gap:.4f})")
-            
-            if reject_reason:
-                print(f"❌ REJECTED {current_sid}: {reject_reason}")
             
             if accepted_sid:
                 with state.lock:
@@ -148,12 +130,14 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
                         state.last_recognized_sid = accepted_sid
                         state.consecutive_match_count = 1
                     
-                    print(f"🔄 Khớp lần {state.consecutive_match_count}/2 cho ID: {accepted_sid}")
-                    FAST_PASS_THRESHOLD = 0.68
-                    is_very_sure = score > FAST_PASS_THRESHOLD
+                    # Ngưỡng fast-pass mới: 0.75
+                    is_very_sure = score > 0.75
+                    required_matches = 3 # Cần 3 frame cho chắc chắn thay vì 2
                     
-                    if state.consecutive_match_count >= 2 or is_very_sure:
-                        print(f"✅ XÁC NHẬN CHÍNH XÁC{' (FAST)' if is_very_sure else ''}: {accepted_sid} (Score: {score:.4f})")
+                    print(f"🔄 Khớp lần {state.consecutive_match_count}/{required_matches} cho ID: {accepted_sid}")
+                    
+                    if state.consecutive_match_count >= required_matches or is_very_sure:
+                        print(f"✅ XÁC NHẬN CHÍNH XÁC{' (FAST)' if is_very_sure else ''}: {accepted_sid}")
                         name, sch, room = state.db.get_student_info(accepted_sid)
                         state.student_data = {
                             "name": name,
@@ -184,7 +168,13 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
                         state.status = "PROCESSING"
                         state.progress = 95
                         found = True
-            # Rejection was already logged above
+            else:
+                if not is_passing_score:
+                    print(f"❌ Low Score (< 0.55)")
+                elif is_ambiguous:
+                    print(f"❌ Ambiguous (Gap < 0.05)")
+                elif not is_consensus_met:
+                    print(f"❌ No Consensus (Voted: {top_voter} x{vote_count})")
         else:
             print("❌ DB Empty")
         

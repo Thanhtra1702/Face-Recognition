@@ -186,18 +186,14 @@ def process_collected_images():
                 print(f"✅ Đã lưu Avatar mới: {target_path}")
             # --------------------------------------------------------
 
-            # 2. Update Qdrant (Augmentation x8 trên aligned face)
+            # 2. Update Qdrant (Augmentation Rút Gọn - Chỉ giữ lại bản chất)
             # Dùng aligned_face (đã detect + align + CLAHE) cho augmentation
             # Sau đó represent(skip) → đồng bộ hoàn toàn với recognition.py
             variants = [
                 ("orig", aligned_face),
                 ("flip", cv2.flip(aligned_face, 1)),
-                ("rot_p5", rotate_image(aligned_face, 5)),
-                ("rot_m5", rotate_image(aligned_face, -5)),
-                ("bright", cv2.convertScaleAbs(aligned_face, alpha=1.2, beta=30)),
-                ("dark", cv2.convertScaleAbs(aligned_face, alpha=0.8, beta=-20)),
-                ("contrast", cv2.convertScaleAbs(aligned_face, alpha=1.5, beta=0)),
-                ("blur", cv2.GaussianBlur(aligned_face, (3, 3), 0))
+                ("bright", cv2.convertScaleAbs(aligned_face, alpha=1.15, beta=20)),
+                ("dark", cv2.convertScaleAbs(aligned_face, alpha=0.85, beta=-15))
             ]
             
             import uuid

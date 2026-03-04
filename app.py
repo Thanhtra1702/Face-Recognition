@@ -183,6 +183,7 @@ def camera_worker():
                         ai_input = state.pending_crop
                     
                     if ai_input is not None:
+                        # Gửi trực tiếp crop THÔ, recognition.py sẽ tự preprocess để tránh double-CLAHE
                         threading.Thread(target=run_recognition_async, 
                                        args=(ai_input.copy(), raw_frame.copy(), state, x_min, y_min, x_max, y_max), 
                                        daemon=True).start()
