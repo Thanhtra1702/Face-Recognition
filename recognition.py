@@ -24,14 +24,20 @@ def preprocess_frame(frame):
 def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_max):
     """Xử lý nhận diện khuôn mặt bất đồng bộ"""
     try:
-        # --- 0. PREPROCESS ---
-        processed_crop = preprocess_frame(face_crop)
-        input_frame = cv2.cvtColor(processed_crop, cv2.COLOR_BGR2RGB)
+        # --- 0. CONVERT (preprocess already done in app.py) ---
+        input_frame = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
         
-        # --- 1. DETECT & EXTRACT FACE ---
+        # Downsize for faster SSD detection (max 300px)
+        h_crop, w_crop = input_frame.shape[:2]
+        max_dim = max(h_crop, w_crop)
+        if max_dim > 300:
+            scale = 300 / max_dim
+            input_frame = cv2.resize(input_frame, (int(w_crop * scale), int(h_crop * scale)))
+        
+        # --- 1. DETECT & ALIGN FACE (ssd: fast + accurate) ---
         face_objs = DeepFace.extract_faces(
             img_path=input_frame,
-            detector_backend="mediapipe",
+            detector_backend="ssd",
             enforce_detection=False, 
             align=True
         )
@@ -67,7 +73,7 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
         search_res = state.db.client.query_points(
             collection_name=COLLECTION_NAME,
             query=embedding,
-            limit=3
+            limit=5
         ).points
         
         found = False
@@ -75,25 +81,64 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
             best_match = search_res[0]
             score = best_match.score
             current_sid = best_match.payload['student_id']
-            print(f"🎯 Top 1: {current_sid} - Score: {score:.4f}")
+            
+            # Log top-K results for debugging
+            for i, res in enumerate(search_res):
+                print(f"  #{i+1}: {res.payload['student_id']} (var: {res.payload.get('variant','?')}) - Score: {res.score:.4f}")
             
             accepted_sid = None
-            is_passing_score = score > 0.45
-            is_ambiguous = False
+            SCORE_THRESHOLD = 0.45
+            
+            # --- STEP A: Count votes (consensus) ---
+            sid_votes = {}
+            for res in search_res:
+                sid = res.payload['student_id']
+                sid_votes[sid] = sid_votes.get(sid, 0) + 1
+            
+            my_votes = sid_votes.get(current_sid, 0)
+            total_results = len(search_res)
+            
+            # Find strongest competitor
             competitor_score = 0
+            competitor_sid = None
             for res in search_res[1:]:
                 if res.payload['student_id'] != current_sid:
                     competitor_score = res.score
+                    competitor_sid = res.payload['student_id']
                     break
+            gap = score - competitor_score if competitor_score > 0 else 1.0
             
-            if competitor_score > 0:
-                gap = score - competitor_score
-                if gap < 0.02 and score < 0.65: 
-                    is_ambiguous = True
-                    print(f"⚠️ Nhập nhằng giữa {current_sid} và người khác (Gap: {gap:.4f})")
+            print(f"  📊 Votes: {current_sid}={my_votes}/{total_results} | Gap: {gap:.4f} | Competitor: {competitor_sid}")
             
-            if is_passing_score and not is_ambiguous:
+            # --- STEP B: Decision logic ---
+            reject_reason = None
+            
+            # B1: Score too low → always reject
+            if score < SCORE_THRESHOLD:
+                reject_reason = f"low_score({score:.4f}<{SCORE_THRESHOLD})"
+            
+            # B2: Consensus disagrees with top score → reject
+            elif total_results >= 3:
+                top_vote_sid = max(sid_votes, key=sid_votes.get)
+                if top_vote_sid != current_sid and sid_votes[top_vote_sid] >= 3:
+                    reject_reason = f"consensus_disagree(top={current_sid}, majority={top_vote_sid} {sid_votes[top_vote_sid]}/{total_results})"
+            
+            # B3: Strong consensus (>=3 votes) → SKIP ambiguity, accept
+            #     This is the key fix: 4/5 votes for same person = confident match
+            if reject_reason is None and my_votes >= 3:
                 accepted_sid = current_sid
+                print(f"🎯 ACCEPTED (strong consensus {my_votes}/{total_results}): {accepted_sid} (Score: {score:.4f})")
+            
+            # B4: Weak consensus (1-2 votes) → apply ambiguity check
+            elif reject_reason is None:
+                if gap < 0.03 and score < 0.60:
+                    reject_reason = f"ambiguous(votes={my_votes}/{total_results}, gap={gap:.4f})"
+                else:
+                    accepted_sid = current_sid
+                    print(f"🎯 ACCEPTED (gap ok): {accepted_sid} (Score: {score:.4f}, Gap: {gap:.4f})")
+            
+            if reject_reason:
+                print(f"❌ REJECTED {current_sid}: {reject_reason}")
             
             if accepted_sid:
                 with state.lock:
@@ -104,10 +149,11 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
                         state.consecutive_match_count = 1
                     
                     print(f"🔄 Khớp lần {state.consecutive_match_count}/2 cho ID: {accepted_sid}")
-                    is_very_sure = score > 0.65
+                    FAST_PASS_THRESHOLD = 0.68
+                    is_very_sure = score > FAST_PASS_THRESHOLD
                     
                     if state.consecutive_match_count >= 2 or is_very_sure:
-                        print(f"✅ XÁC NHẬN CHÍNH XÁC{' (FAST)' if is_very_sure else ''}: {accepted_sid}")
+                        print(f"✅ XÁC NHẬN CHÍNH XÁC{' (FAST)' if is_very_sure else ''}: {accepted_sid} (Score: {score:.4f})")
                         name, sch, room = state.db.get_student_info(accepted_sid)
                         state.student_data = {
                             "name": name,
@@ -138,8 +184,7 @@ def run_recognition_async(face_crop, full_frame, state, x_min, y_min, x_max, y_m
                         state.status = "PROCESSING"
                         state.progress = 95
                         found = True
-            else:
-                print(f"❌ Low Score (< 0.45) hoặc Ambiguous")
+            # Rejection was already logged above
         else:
             print("❌ DB Empty")
         

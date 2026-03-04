@@ -105,21 +105,17 @@ def init_qdrant():
             if portrait_img.size > 0:
                 cv2.imwrite(img_path, portrait_img)
             
-            # 4. Lấy aligned face (đã detect + align + CLAHE) để tạo vector
+            # 4. Lấy aligned face (đã detect + align) để tạo vector
             aligned_face = face_objs[0]['face']
             if aligned_face.max() <= 1.0:
                 aligned_face = (aligned_face * 255).astype(np.uint8)
             
-            # 5. Tạo các biến thể (Augmentation x8 trên aligned face)
+            # 5. Tạo các biến thể (Augmentation x3 — KHÔNG dùng flip vì gây false positive)
+            # Flip variant bị loại: mặt lật của người A dễ match nhầm mặt gốc người B
             variants = [
                 ("orig", aligned_face),
-                ("flip", cv2.flip(aligned_face, 1)),
-                ("rot_p5", rotate_image(aligned_face, 5)),
-                ("rot_m5", rotate_image(aligned_face, -5)),
-                ("bright", cv2.convertScaleAbs(aligned_face, alpha=1.2, beta=30)),
-                ("dark", cv2.convertScaleAbs(aligned_face, alpha=0.8, beta=-20)),
-                ("contrast", cv2.convertScaleAbs(aligned_face, alpha=1.5, beta=0)),
-                ("blur", cv2.GaussianBlur(aligned_face, (3, 3), 0))
+                ("bright", cv2.convertScaleAbs(aligned_face, alpha=1.15, beta=20)),
+                ("dark", cv2.convertScaleAbs(aligned_face, alpha=0.85, beta=-15)),
             ]
             
             # 6. Tạo vector và lưu vào Qdrant (detect_backend='skip')

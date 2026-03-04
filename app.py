@@ -48,6 +48,11 @@ def camera_worker():
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
     )
+    
+    # Frame skipping for smoother camera
+    frame_count = 0
+    cached_face_data = None  # (x_min, y_min, x_max, y_max)
+    cached_landmarks = None
 
     while state.running:
         ret, frame = cap.read()
@@ -55,11 +60,16 @@ def camera_worker():
         frame = cv2.flip(frame, 1)
         raw_frame = frame.copy()
         current_time = time.time()
+        frame_count += 1
         
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = face_mesh.process(rgb_frame)
+        # Only run face_mesh every 2nd frame for smoother display
+        run_detection = (frame_count % 2 == 0) or cached_face_data is None
         
-        if results.multi_face_landmarks:
+        if run_detection:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = face_mesh.process(rgb_frame)
+        
+        if run_detection and results.multi_face_landmarks:
             h, w, _ = frame.shape
             screen_center_x, screen_center_y = w // 2, h // 2
             best_face_data = None
@@ -84,7 +94,13 @@ def camera_worker():
                     best_face_data = (x_min, y_min, x_max, y_max)
 
             if best_face_data:
-                x_min, y_min, x_max, y_max = best_face_data
+                cached_face_data = best_face_data
+                cached_landmarks = results.multi_face_landmarks[0]
+        
+        # Use cached or fresh face data
+        h, w = frame.shape[:2]
+        if cached_face_data:
+                x_min, y_min, x_max, y_max = cached_face_data
                 
                 try:
                     fas_pad = int((x_max - x_min) * 0.1)
@@ -100,23 +116,24 @@ def camera_worker():
                             with state.lock:
                                 state.fas_score = score
                     
-                    face_landmarks = results.multi_face_landmarks[0]
-                    ear_left = calculate_ear(face_landmarks.landmark, LEFT_EYE, w, h)
-                    ear_right = calculate_ear(face_landmarks.landmark, RIGHT_EYE, w, h)
-                    ear = (ear_left + ear_right) / 2.0
-                    
-                    with state.lock:
-                        if ear < state.blink_threshold:
-                            if not hasattr(state, '_eye_closed'): state._eye_closed = True
-                        else:
-                            if hasattr(state, '_eye_closed') and state._eye_closed:
-                                state.blink_count += 1
-                                state._eye_closed = False
-                                state.last_blink_time = time.time()
+                    face_landmarks = cached_landmarks
+                    if face_landmarks:
+                        ear_left = calculate_ear(face_landmarks.landmark, LEFT_EYE, w, h)
+                        ear_right = calculate_ear(face_landmarks.landmark, RIGHT_EYE, w, h)
+                        ear = (ear_left + ear_right) / 2.0
                         
-                        is_pass_fas = state.fas_score > 0.99
-                        is_pass_blink = (time.time() - state.last_blink_time < 4.0)
-                        state.is_live = is_pass_fas or is_pass_blink
+                        with state.lock:
+                            if ear < state.blink_threshold:
+                                if not hasattr(state, '_eye_closed'): state._eye_closed = True
+                            else:
+                                if hasattr(state, '_eye_closed') and state._eye_closed:
+                                    state.blink_count += 1
+                                    state._eye_closed = False
+                                    state.last_blink_time = time.time()
+                            
+                            is_pass_fas = state.fas_score > 0.99
+                            is_pass_blink = (time.time() - state.last_blink_time < 4.0)
+                            state.is_live = is_pass_fas or is_pass_blink
                 except Exception as e:
                     print(f"Liveness Logic Error: {e}")
                 
@@ -140,9 +157,9 @@ def camera_worker():
                 cv2.line(frame, (x_max, y_max), (x_max - l, y_max), color, t)
                 cv2.line(frame, (x_max, y_max), (x_max, y_max - l), color, t)
                 
-                if is_near_enough and state.is_live and state.status == "SCANNING" and (current_time - state.last_scan_time > 1.0):
-                    pad_w = int((x_max - x_min) * 0.4)
-                    pad_h = int((y_max - y_min) * 0.4)
+                if is_near_enough and state.is_live and state.status == "SCANNING" and (current_time - state.last_scan_time > 0.3):
+                    pad_w = int((x_max - x_min) * 0.25)
+                    pad_h = int((y_max - y_min) * 0.25)
                     x1, y1 = max(0, x_min - pad_w), max(0, y_min - pad_h)
                     x2, y2 = min(w, x_max + pad_w), min(h, y_max + pad_h)
                     face_crop = raw_frame[y1:y2, x1:x2].copy()
@@ -161,14 +178,13 @@ def camera_worker():
             else:
                 prog = int((elapsed / 0.2) * 90)
                 with state.lock: state.progress = min(90, max(0, prog))
-                if elapsed > 0.1:
+                if elapsed > 0.01:
                     with state.lock:
                         ai_input = state.pending_crop
                     
                     if ai_input is not None:
-                        processed_ai_frame = preprocess_frame(ai_input.copy())
                         threading.Thread(target=run_recognition_async, 
-                                       args=(processed_ai_frame, raw_frame.copy(), state, x_min, y_min, x_max, y_max), 
+                                       args=(ai_input.copy(), raw_frame.copy(), state, x_min, y_min, x_max, y_max), 
                                        daemon=True).start()
                         with state.lock: 
                             state.process_start_time = current_time + 1000 
@@ -180,7 +196,7 @@ def camera_worker():
             with state.lock:
                 state.frame = frame.copy()
         
-        time.sleep(0.005) 
+        time.sleep(0.001) 
 
 # Start Thread
 t = threading.Thread(target=camera_worker, daemon=True)
