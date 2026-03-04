@@ -136,21 +136,32 @@ def camera_worker():
                 x_min, y_min, x_max, y_max = cached_face_data
                 h, w = frame.shape[:2]
                 
-                # --- ANTISPOOF & LANDMARKS ---
+                # --- ANTISPOOF & LANDMARKS (Multi-Scale) ---
                 try:
-                    fas_pad = int((x_max - x_min) * 0.15)
-                    fx1, fy1 = max(0, x_min - fas_pad), max(0, y_min - fas_pad)
-                    fx2, fy2 = min(w, x_max + fas_pad), min(h, y_max + fas_pad)
-                    fas_face = raw_frame[fy1:fy2, fx1:fx2]
+                    # 1. Dự đoán bằng Multi-Scale: Crop hẹp (Texture) và Crop rộng (Context)
+                    # FAS Net chuẩn yêu cầu crop rộng khoảng 2.7x so với khuôn mặt
+                    w_f, h_f = x_max - x_min, y_max - y_min
                     
-                    if fas_face.size > 0:
+                    # Crop 1: Texture (1.0x)
+                    fas_pad1 = int(w_f * 0.15)
+                    fx1, fy1 = max(0, x_min - fas_pad1), max(0, y_min - fas_pad1)
+                    fx2, fy2 = min(w, x_max + fas_pad1), min(h, y_max + fas_pad1)
+                    face_tight = raw_frame[fy1:fy2, fx1:fx2]
+                    
+                    # Crop 2: Context (2.7x) - Để bắt viền màn hình điện thoại
+                    fas_pad2 = int(w_f * 0.8) # Mở rộng ra xung quanh
+                    fw1, fh1 = max(0, x_min - fas_pad2), max(0, y_min - fas_pad2)
+                    fw2, fh2 = min(w, x_max + fas_pad2), min(h, y_max + fas_pad2)
+                    face_wide = raw_frame[fh1:fh2, fw1:fw2]
+                    
+                    if face_tight.size > 0:
                         if not hasattr(state, '_fas_frame_counter'): state._fas_frame_counter = 0
                         state._fas_frame_counter += 1
                         
-                        # Tối ưu: Nếu đã Live thì quét FAS thưa hơn (mỗi 10 khung hình) để mượt camera
+                        # Quét thưa để mượt camera
                         fas_interval = 10 if state.is_live else 5
                         if state._fas_frame_counter % fas_interval == 0:
-                            score = state.anti_spoof.predict(fas_face)
+                            score = state.anti_spoof.predict(face_tight, face_wide)
                             with state.lock:
                                 state.fas_score = (state.fas_score * 0.5) + (score * 0.5)
                     
@@ -165,8 +176,8 @@ def camera_worker():
                             state._eye_closed = False
                             state.last_blink_time = time.time()
                         
-                        # Ngưỡng tối ưu 0.95 + Nháy mắt
-                        is_pass_fas = state.fas_score > 0.95
+                        # Ngưỡng nới lỏng 0.85 cho người đeo kính + Nháy mắt
+                        is_pass_fas = state.fas_score > 0.85
                         is_pass_blink = (time.time() - state.last_blink_time < 5.0)
                         state.is_live = is_pass_fas and is_pass_blink
                 except: pass
@@ -178,7 +189,13 @@ def camera_worker():
                 dist_l = abs(nose_tip.x - l_eye_corner.x)
                 dist_r = abs(nose_tip.x - r_eye_corner.x)
                 turn_ratio = dist_l / (dist_r + 1e-6)
-                is_looking_straight = (0.5 < turn_ratio < 2.0) # Nới lỏng một chút cho thoải mái
+                is_looking_straight = (0.4 < turn_ratio < 2.5) # Nới rất lỏng
+                
+                # Debug print mỗi 30 frames
+                if frame_count % 30 == 0:
+                   print(f"Status: FAS={state.fas_score:.2f}({'OK' if is_pass_fas else 'FAIL'}), "
+                         f"Blink={'OK' if is_pass_blink else 'WAITING'}, "
+                         f"Straight={'OK' if is_looking_straight else 'FAIL'}")
                 
                 face_width = x_max - x_min
                 is_near_enough = face_width > 180 
