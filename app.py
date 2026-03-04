@@ -36,6 +36,36 @@ try:
 except Exception as e:
     print(f"❌ Error preloading model: {e}")
 
+# --- AI HELPERS: ALIGNMENT ON CPU ---
+def get_affine_aligned_face(frame, landmarks, target_size=(112, 112)):
+    """Align khuôn mặt bằng toán học (Affine) dựa trên landmarks - CỰC NHANH"""
+    h, w = frame.shape[:2]
+    # Landmark idx Mediapipe cho tâm mắt
+    # Trái: 33, 133 -> trung tâm 468 landmarks
+    l_eye = np.mean([ (landmarks.landmark[33].x * w, landmarks.landmark[33].y * h), (landmarks.landmark[133].x * w, landmarks.landmark[133].y * h) ], axis=0)
+    r_eye = np.mean([ (landmarks.landmark[362].x * w, landmarks.landmark[362].y * h), (landmarks.landmark[263].x * w, landmarks.landmark[263].y * h) ], axis=0)
+    
+    dX = r_eye[0] - l_eye[0]
+    dY = r_eye[1] - l_eye[1]
+    angle = np.degrees(np.arctan2(dY, dX))
+    
+    # Giữ tỉ lệ mắt ở vị trí 35% chiều ngang
+    dist = np.sqrt(dX**2 + dY**2)
+    desired_dist = (0.7 - 0.3) * target_size[0]
+    scale = desired_dist / dist
+    
+    eye_center = ( (l_eye[0] + r_eye[0]) // 2, (l_eye[1] + r_eye[1]) // 2 )
+    M = cv2.getRotationMatrix2D(eye_center, angle, scale)
+    
+    # Điều chỉnh dịch chuyển để mắt nằm ở hàng 35% chiều dọc
+    tX = target_size[0] * 0.5
+    tY = target_size[1] * 0.35
+    M[0, 2] += (tX - eye_center[0])
+    M[1, 2] += (tY - eye_center[1])
+    
+    aligned_face = cv2.warpAffine(frame, M, (target_size[0], target_size[1]), flags=cv2.INTER_CUBIC)
+    return aligned_face
+
 # --- CAMERA THREAD ---
 def camera_worker():
     cap = cv2.VideoCapture(0)
@@ -49,9 +79,10 @@ def camera_worker():
         min_tracking_confidence=0.5
     )
     
-    # Frame skipping for smoother camera
     frame_count = 0
-    cached_face_data = None  # (x_min, y_min, x_max, y_max)
+    face_stable_start_time = 0 
+    last_face_center = None # Để kiểm tra đứng yên
+    cached_face_data = None  
     cached_landmarks = None
 
     while state.running:
@@ -62,48 +93,52 @@ def camera_worker():
         current_time = time.time()
         frame_count += 1
         
-        # Only run face_mesh every 2nd frame for smoother display
         run_detection = (frame_count % 2 == 0) or cached_face_data is None
         
         if run_detection:
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_mesh.process(rgb_frame)
-        
-        if run_detection and results.multi_face_landmarks:
-            h, w, _ = frame.shape
-            screen_center_x, screen_center_y = w // 2, h // 2
-            best_face_data = None
-            max_focus_score = -1
+            if results.multi_face_landmarks:
+                h, w, _ = frame.shape
+                screen_center_x, screen_center_y = w // 2, h // 2
+                best_face_data = None
+                max_focus_score = -1
 
-            for face_landmarks in results.multi_face_landmarks:
-                x_min, y_min = w, h
-                x_max, y_max = 0, 0
-                for lm in face_landmarks.landmark:
-                    cx, cy = int(lm.x * w), int(lm.y * h)
-                    x_min, y_min = min(x_min, cx), min(y_min, cy)
-                    x_max, y_max = max(x_max, cx), max(y_max, cy)
-                
-                area = (x_max - x_min) * (y_max - y_min)
-                face_center_x = (x_min + x_max) / 2
-                face_center_y = (y_min + y_max) / 2
-                dist_to_center = ((face_center_x - screen_center_x)**2 + (face_center_y - screen_center_y)**2)**0.5
-                focus_score = area / (dist_to_center + 1) 
-                
-                if focus_score > max_focus_score:
-                    max_focus_score = focus_score
-                    best_face_data = (x_min, y_min, x_max, y_max)
+                for face_landmarks in results.multi_face_landmarks:
+                    x_min, y_min = w, h
+                    x_max, y_max = 0, 0
+                    for lm in face_landmarks.landmark:
+                        cx, cy = int(lm.x * w), int(lm.y * h)
+                        x_min, y_min = min(x_min, cx), min(y_min, cy)
+                        x_max, y_max = max(x_max, cx), max(y_max, cy)
+                    
+                    area = (x_max - x_min) * (y_max - y_min)
+                    face_center_x = (x_min + x_max) / 2
+                    face_center_y = (y_min + y_max) / 2
+                    dist_to_center = ((face_center_x - screen_center_x)**2 + (face_center_y - screen_center_y)**2)**0.5
+                    focus_score = area / (dist_to_center + 1) 
+                    
+                    if focus_score > max_focus_score:
+                        max_focus_score = focus_score
+                        best_face_data = (x_min, y_min, x_max, y_max)
 
-            if best_face_data:
-                cached_face_data = best_face_data
-                cached_landmarks = results.multi_face_landmarks[0]
+                if best_face_data:
+                    cached_face_data = best_face_data
+                    cached_landmarks = results.multi_face_landmarks[0]
+                else:
+                    cached_face_data = None
+                    face_stable_start_time = 0
+            else:
+                cached_face_data = None
+                face_stable_start_time = 0
         
-        # Use cached or fresh face data
-        h, w = frame.shape[:2]
         if cached_face_data:
                 x_min, y_min, x_max, y_max = cached_face_data
+                h, w = frame.shape[:2]
                 
+                # --- ANTISPOOF & LANDMARKS ---
                 try:
-                    fas_pad = int((x_max - x_min) * 0.1)
+                    fas_pad = int((x_max - x_min) * 0.15)
                     fx1, fy1 = max(0, x_min - fas_pad), max(0, y_min - fas_pad)
                     fx2, fy2 = min(w, x_max + fas_pad), min(h, y_max + fas_pad)
                     fas_face = raw_frame[fy1:fy2, fx1:fx2]
@@ -111,43 +146,70 @@ def camera_worker():
                     if fas_face.size > 0:
                         if not hasattr(state, '_fas_frame_counter'): state._fas_frame_counter = 0
                         state._fas_frame_counter += 1
-                        if state._fas_frame_counter % 3 == 0 or not state.is_live:
+                        
+                        # Tối ưu: Nếu đã Live thì quét FAS thưa hơn (mỗi 10 khung hình) để mượt camera
+                        fas_interval = 10 if state.is_live else 5
+                        if state._fas_frame_counter % fas_interval == 0:
                             score = state.anti_spoof.predict(fas_face)
                             with state.lock:
-                                state.fas_score = score
+                                state.fas_score = (state.fas_score * 0.5) + (score * 0.5)
                     
-                    face_landmarks = cached_landmarks
-                    if face_landmarks:
-                        ear_left = calculate_ear(face_landmarks.landmark, LEFT_EYE, w, h)
-                        ear_right = calculate_ear(face_landmarks.landmark, RIGHT_EYE, w, h)
-                        ear = (ear_left + ear_right) / 2.0
+                    ear_left = calculate_ear(cached_landmarks.landmark, LEFT_EYE, w, h)
+                    ear_right = calculate_ear(cached_landmarks.landmark, RIGHT_EYE, w, h)
+                    ear = (ear_left + ear_right) / 2.0
+                    
+                    with state.lock:
+                        if ear < state.blink_threshold: state._eye_closed = True
+                        elif hasattr(state, '_eye_closed') and state._eye_closed:
+                            state.blink_count += 1
+                            state._eye_closed = False
+                            state.last_blink_time = time.time()
                         
-                        with state.lock:
-                            if ear < state.blink_threshold:
-                                if not hasattr(state, '_eye_closed'): state._eye_closed = True
-                            else:
-                                if hasattr(state, '_eye_closed') and state._eye_closed:
-                                    state.blink_count += 1
-                                    state._eye_closed = False
-                                    state.last_blink_time = time.time()
-                            
-                            is_pass_fas = state.fas_score > 0.99
-                            is_pass_blink = (time.time() - state.last_blink_time < 4.0)
-                            state.is_live = is_pass_fas or is_pass_blink
-                except Exception as e:
-                    print(f"Liveness Logic Error: {e}")
+                        # Ngưỡng tối ưu 0.95 + Nháy mắt
+                        is_pass_fas = state.fas_score > 0.95
+                        is_pass_blink = (time.time() - state.last_blink_time < 5.0)
+                        state.is_live = is_pass_fas and is_pass_blink
+                except: pass
+                
+                # --- HEAD POSE CHECK ---
+                nose_tip = cached_landmarks.landmark[1]
+                l_eye_corner = cached_landmarks.landmark[33]
+                r_eye_corner = cached_landmarks.landmark[263]
+                dist_l = abs(nose_tip.x - l_eye_corner.x)
+                dist_r = abs(nose_tip.x - r_eye_corner.x)
+                turn_ratio = dist_l / (dist_r + 1e-6)
+                is_looking_straight = (0.5 < turn_ratio < 2.0) # Nới lỏng một chút cho thoải mái
                 
                 face_width = x_max - x_min
                 is_near_enough = face_width > 180 
+                face_center = ((x_min + x_max) // 2, (y_min + y_max) // 2)
+
+                # --- STABILITY CHECK ---
+                is_moving = False
+                if last_face_center is not None:
+                    dist = np.sqrt((face_center[0] - last_face_center[0])**2 + (face_center[1] - last_face_center[1])**2)
+                    if dist > 25: is_moving = True # Nới lỏng độ nhạy rung lắc lên 25px
                 
-                with state.lock:
-                    state.is_near = is_near_enough
+                last_face_center = face_center
+
+                if is_near_enough and state.is_live and is_looking_straight and not is_moving:
+                    if face_stable_start_time == 0: face_stable_start_time = current_time
+                else: 
+                    face_stable_start_time = 0 
                 
+                stable_duration = current_time - face_stable_start_time if face_stable_start_time > 0 else 0
+                
+                with state.lock: state.is_near = is_near_enough
+                
+                # --- SIMPLE UI COLORS ---
                 color = (255, 255, 255)
-                if is_near_enough: color = (33, 111, 242)
-                if state.status == "CONFIRM": color = (73, 132, 30)
+                thickness = 2
+                if is_near_enough:
+                    color = (33, 165, 255) # Cam
+                if state.status == "CONFIRM":
+                    color = (0, 255, 0) # Xanh lá
                 
-                t, l = 3, 40
+                t, l = thickness, 40
                 cv2.line(frame, (x_min, y_min), (x_min + l, y_min), color, t)
                 cv2.line(frame, (x_min, y_min), (x_min, y_min + l), color, t)
                 cv2.line(frame, (x_max, y_min), (x_max - l, y_min), color, t)
@@ -157,46 +219,37 @@ def camera_worker():
                 cv2.line(frame, (x_max, y_max), (x_max - l, y_max), color, t)
                 cv2.line(frame, (x_max, y_max), (x_max, y_max - l), color, t)
                 
-                if is_near_enough and state.is_live and state.status == "SCANNING" and (current_time - state.last_scan_time > 0.3):
-                    pad_w = int((x_max - x_min) * 0.25)
-                    pad_h = int((y_max - y_min) * 0.25)
-                    x1, y1 = max(0, x_min - pad_w), max(0, y_min - pad_h)
-                    x2, y2 = min(w, x_max + pad_w), min(h, y_max + pad_h)
-                    face_crop = raw_frame[y1:y2, x1:x2].copy()
+                # --- TRIGGER RECOGNITION (0.8s STABILITY) ---
+                if is_near_enough and state.is_live and is_looking_straight and \
+                   state.status == "SCANNING" and (stable_duration > 0.8) and \
+                   (current_time - state.last_scan_time > 0.5):
                     
-                    if face_crop.size > 0:
+                    # ALIGN TRỰC TIẾP BẰNG CPU TẠI ĐÂY
+                    aligned_crop = get_affine_aligned_face(raw_frame, cached_landmarks)
+                    
+                    if aligned_crop.size > 0:
                         with state.lock:
                             state.status = "PROCESSING"
                             state.process_start_time = current_time
                             state.progress = 0
-                            state.pending_crop = face_crop
-
+                            state.pending_crop = aligned_crop # Gửi ảnh ĐÃ ALIGN
+                            
         if state.status == "PROCESSING":
             elapsed = current_time - state.process_start_time
-            if elapsed < 0:
-                with state.lock: state.progress = 90 + int((current_time * 10) % 9)
-            else:
-                prog = int((elapsed / 0.2) * 90)
-                with state.lock: state.progress = min(90, max(0, prog))
-                if elapsed > 0.01:
-                    with state.lock:
-                        ai_input = state.pending_crop
-                    
-                    if ai_input is not None:
-                        # Gửi trực tiếp crop THÔ, recognition.py sẽ tự preprocess để tránh double-CLAHE
-                        threading.Thread(target=run_recognition_async, 
-                                       args=(ai_input.copy(), raw_frame.copy(), state, x_min, y_min, x_max, y_max), 
-                                       daemon=True).start()
-                        with state.lock: 
-                            state.process_start_time = current_time + 1000 
-                            state.pending_crop = None
-                    else:
-                        with state.lock: state.status = "SCANNING"
+            if elapsed > 0.01:
+                with state.lock: ai_input = state.pending_crop
+                if ai_input is not None:
+                    threading.Thread(target=run_recognition_async, 
+                                   args=(ai_input.copy(), raw_frame.copy(), state, x_min, y_min, x_max, y_max), 
+                                   daemon=True).start()
+                    with state.lock: 
+                        state.process_start_time = current_time + 1000 
+                        state.pending_crop = None
+                else:
+                    with state.lock: state.status = "SCANNING"
 
         if state.status != "CONFIRM":
-            with state.lock:
-                state.frame = frame.copy()
-        
+            with state.lock: state.frame = frame.copy()
         time.sleep(0.001) 
 
 # Start Thread
@@ -212,12 +265,10 @@ def generate_frames():
     while True:
         with state.lock:
             if state.frame is None: 
-                time.sleep(0.01)
-                continue
+                time.sleep(0.01); continue
             _, buffer = cv2.imencode('.jpg', state.frame)
             frame_bytes = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 @app.get("/video_feed")
 async def video_feed():
@@ -227,12 +278,9 @@ async def video_feed():
 async def get_status():
     with state.lock:
         return {
-            "status": state.status,
-            "progress": int(state.progress),
-            "data": state.student_data,
-            "is_near": bool(state.is_near),
-            "is_live": bool(state.is_live),
-            "fas_score": float(state.fas_score),
+            "status": state.status, "progress": int(state.progress),
+            "data": state.student_data, "is_near": bool(state.is_near),
+            "is_live": bool(state.is_live), "fas_score": float(state.fas_score),
             "blink_count": int(state.blink_count)
         }
 
@@ -241,42 +289,25 @@ class ActionRequest(BaseModel):
 
 @app.post("/api/action")
 async def handle_action(req: ActionRequest):
-    action = req.action
-    
-    if action == 'confirm':
-        if state.student_data:
-            sid = state.student_data['student_id']
-            try:
-                student_collect_dir = os.path.join("collected_faces", sid)
-                if not os.path.exists(student_collect_dir):
-                    os.makedirs(student_collect_dir)
-                filename = f"{int(time.time())}.jpg"
-                save_path = os.path.join(student_collect_dir, filename)
-                with state.lock:
-                    target_image = state.clean_snapshot if state.clean_snapshot is not None else state.frame
-                    if target_image is not None:
-                        cv2.imwrite(save_path, target_image)
-                        print(f"📸 Đã lưu ảnh SẠCH vào folder tự học: {save_path}")
-            except Exception as e:
-                print(f"⚠️ Lỗi lưu ảnh tự học: {e}")
-            print(f"CONFIRMED: {sid}")
+    if req.action == 'confirm' and state.student_data:
+        sid = state.student_data['student_id']
+        try:
+            student_collect_dir = os.path.join("collected_faces", sid)
+            if not os.path.exists(student_collect_dir): os.makedirs(student_collect_dir)
+            save_path = os.path.join(student_collect_dir, f"{int(time.time())}.jpg")
+            with state.lock:
+                target_image = state.clean_snapshot if state.clean_snapshot is not None else state.frame
+                if target_image is not None: cv2.imwrite(save_path, target_image)
+        except Exception as e: print(f"⚠️ Error: {e}")
     
     with state.lock:
-        state.status = "SCANNING"
-        state.student_data = None
+        state.status = "SCANNING"; state.student_data = None
         state.last_scan_time = time.time() + 0.5 
-        
     return {"success": True}
 
-def main():
+if __name__ == "__main__":
     import uvicorn
-    try:
-        # FastAPI server running on uvicorn
-        # Chỉ hiện log Error để tắt máy nhanh hơn (1 lần Ctrl+C)
-        uvicorn.run(app, host="0.0.0.0", port=5000, log_level="error")
+    try: uvicorn.run(app, host="0.0.0.0", port=5000, log_level="error")
     except KeyboardInterrupt:
         state.running = False
         os._exit(0)
-
-if __name__ == "__main__":
-    main()
