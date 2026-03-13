@@ -1,35 +1,41 @@
-# Hệ Thống Điểm Danh Sinh Viên Thông Minh (AI Kiosk) - FastAPI & Anti-Spoofing
+# Hệ Thống Điểm Danh Sinh Viên Thông Minh (AI Kiosk)
 
-Dự án Kiosk điểm danh sử dụng công nghệ nhận diện khuôn mặt tiên tiến (ArcFace + Mediapipe), tích hợp hệ thống chống giả mạo đa tầng (Anti-Spoofing), chạy trên nền tảng FastAPI hiệu năng cao.
+Dự án Kiosk điểm danh sử dụng công nghệ nhận diện khuôn mặt tiên tiến (**ArcFace ONNX + Mediapipe**), tích hợp hệ thống chống giả mạo đa tầng (**Multi-Scale Anti-Spoofing**), chạy trên nền tảng **FastAPI** hiệu năng cao.
 
 ## 🚀 Tính Năng Chính
 
-- **FastAPI Core:** Sử dụng FastAPI thay thế Flask để đạt tốc độ phản hồi cực nhanh, xử lý bất đồng bộ (Asynchronous) tối ưu.
-- **Chống Giả Mạo Đa Tầng (Dual-Layer Anti-Spoofing):**
-  - **Tầng 1 (Passive):** Sử dụng MiniFASNetV2 phân tích bề mặt da, phát hiện ảnh chụp hoặc video giả mạo với độ chính xác cao.
-  - **Tầng 2 (Active Fallback):** Yêu cầu nháy mắt (Blink Detection) nếu AI nghi ngờ hoặc điều kiện ánh sáng không lý tưởng.
-- **Nhận diện khuôn mặt HD:** Xử lý thời gian thực trên khung hình 1280x720, tracking mượt mà, độ trễ thấp.
-- **Smart Snapshot:** Tự động "đóng băng" camera và vẽ khung xanh xác nhận khi nhận diện thành công.
-- **Clean Snapshot & Self-Learning:** Lưu trữ song song ảnh gốc (Clean) để tự động training lại hệ thống, nâng cao độ chính xác theo thời gian.
-- **Phân loại khoảng cách:** Chỉ kích hoạt nhận diện khi sinh viên đứng trong khoảng cách tối ưu (1.5m - 2m).
+- **ONNX Direct Inference:** ArcFace ONNX Runtime trực tiếp (~10-30ms/face), không qua wrapper nặng, hỗ trợ tự động phát hiện GPU CUDA.
+- **Test-Time Augmentation (TTA):** Tạo 3 biến thể ảnh (Original + CLAHE + Bright) → trung bình embedding → nhận diện cực kỳ ổn định trong mọi điều kiện ánh sáng.
+- **Chống Giả Mạo Đa Tầng (Multi-Layer Anti-Spoofing):**
+  - **Tầng 1 — MiniFASNetV2 Multi-Scale:** Phân tích kết cấu da (cận cảnh) & bối cảnh (rộng 2.7x) để phát hiện ảnh/video giả mạo.
+  - **Tầng 2 — Blink Detection:** Phát hiện nháy mắt qua Eye Aspect Ratio (EAR).
+  - **Tầng 3 — FFT Moiré Detection:** Phát hiện vân pixel từ màn hình điện thoại/máy tính.
+- **Smart Decision Logic:**
+  - **Top-5 Voting Consensus:** Truy vấn 5 vectors gần nhất, chỉ xác nhận khi đa số phiếu bầu cho cùng 1 người.
+  - **Ambiguity Gap Protection:** Từ chối nếu chênh lệch Top-1 và Top-2 quá nhỏ.
+  - **SOTA Fast Pass:** Xác nhận tức thì khi Score > 0.75 và Votes ≥ 3/5.
+- **5-Point Affine Alignment:** Chuẩn hóa khuôn mặt về template 112×112 chuẩn ArcFace từ 468 Mediapipe landmarks.
+- **Qdrant Vector Database:** HNSW Index cho tốc độ tìm kiếm ổn định O(log N) ngay cả với hàng chục nghìn khuôn mặt.
+- **Self-Learning:** Tự động lưu ảnh check-in và cập nhật database để cải thiện độ chính xác theo thời gian.
 
 ## 🛠 Yêu Cầu Hệ Thống
 
 - **OS:** Windows 10/11, macOS, hoặc Linux.
-- **Python:** 3.8 - 3.10 (Khuyên dùng 3.10).
+- **Python:** 3.9 - 3.11 (Khuyên dùng 3.11).
 - **Webcam:** Hỗ trợ HD 720p.
-- **Thư viện chính:** mediapipe, deepface, fastapi, uvicorn, qdrant-client, onnxruntime, opencv-python.
+- **Docker:** Cần cho Qdrant Vector Database.
+- **Thư viện chính:** mediapipe, onnxruntime, fastapi, uvicorn, qdrant-client, opencv-python.
 
 ## 📦 Cài Đặt
 
 ### 1. Clone dự án
 
 ```bash
-git clone https://github.com/Thanhtra1702/Face-Recognition.git
+git clone https://github.com/Thanhtra1702/student-face.git
 cd student_face
 ```
 
-### 2. Tạo môi trường ảo (Khuyên dùng)
+### 2. Tạo môi trường ảo
 
 ```bash
 python -m venv venv
@@ -43,25 +49,54 @@ python -m venv venv
 pip install -r requirements.txt
 ```
 
+### 4. Tải model ArcFace ONNX
+
+Tải file `w600k_r50.onnx` (~166MB) và đặt vào thư mục gốc:
+
+```bash
+curl -L -o w600k_r50.onnx https://github.com/yakhyo/face-reidentification/releases/download/v0.0.1/w600k_r50.onnx
+```
+
+### 5. Khởi động Qdrant (Docker)
+
+```bash
+docker-compose up -d
+```
+
 ## 🗄 Khởi Tạo Dữ Liệu (Lần đầu chạy)
 
-1. **Khởi tạo Qdrant (Vector DB):**
+1. **Đặt ảnh khuôn mặt** vào thư mục `database/`. Tên file = MSSV (VD: `QE190099.jpg`).
+
+2. **Khởi tạo Qdrant (Vector DB):**
 
    ```bash
    python init_qdrant.py
    ```
 
-2. **Khởi tạo SQLite (Metadata DB):**
+3. **Khởi tạo SQLite (Metadata DB):**
 
    ```bash
    python setup_database.py
    ```
 
-3. **Xử lý ảnh tự học & Augmentation:**
+## 👤 Thêm Người Dùng Mới
 
-   ```bash
-   python process_collected_faces.py
-   ```
+Đặt ảnh vào folder con trong `collected_faces/`, tên folder = ID người dùng:
+
+```
+collected_faces/
+  └── QE190999/
+        ├── anh1.jpg
+        └── anh2.jpg
+```
+
+Chạy:
+
+```bash
+python process_collected_faces.py
+```
+
+Script sẽ tự động: detect → align → embedding → upsert Qdrant → cập nhật SQLite.
 
 ## 🖥 Chạy Ứng Dụng Kiosk
 
@@ -70,37 +105,48 @@ python app.py
 ```
 
 - Truy cập: `http://localhost:5000`
-- Nhấn **Ctrl+C**: Tắt ứng dụng ngay lập tức (Xử lý dứt khoát).
+- Nhấn **Ctrl+C**: Tắt ứng dụng.
 
-## 📂 Cấu Trúc Dự Án (Modular Structure)
-
-Dự án được phân tách thành các module chuyên biệt để dễ bảo trì và mở rộng:
+## 📂 Cấu Trúc Dự Án
 
 ```text
 📁 student_face/
-├── 📄 app.py                     # Entry point (FastAPI Server & Camera Loop)
-├── 📄 anti_spoof.py              # Logic Chống giả mạo & Thị giác máy tính
-├── 📄 recognition.py             # Logic Nhận diện khuôn mặt (DeepFace & Qdrant)
-├── 📄 core_state.py              # Quản lý trạng thái hệ thống (KioskState)
-├── 📄 kiosk_db.py                # Database Handler (Qdrant + SQLite)
-├── 📄 process_collected_faces.py # Xử lý ảnh tự học & Augmentation
-├── 📁 templates/                 # UI (FastAPI Jinja2 Templates)
-├── 📁 static/                    # Assets (CSS/JS/Images)
-├── 📁 collected_faces/           # Ảnh chờ xử lý / processed
-├── 📄 MiniFASNetV2.onnx          # Model AI Chống giả mạo
-└── 📁 qdrant_db/                 # Vector Database
+├── 📄 app.py                      # Entry point (FastAPI Server & Camera Loop)
+├── 📄 arcface_onnx.py             # ArcFace ONNX Engine (Singleton, GPU auto-detect)
+├── 📄 anti_spoof.py               # Chống giả mạo Multi-Scale + Blink + FFT Moiré
+├── 📄 recognition.py              # Nhận diện khuôn mặt (ONNX ArcFace + TTA + Voting)
+├── 📄 core_state.py               # Quản lý trạng thái hệ thống (KioskState)
+├── 📄 kiosk_db.py                 # Database Handler (Qdrant + SQLite)
+├── 📄 init_qdrant.py              # Khởi tạo Vector Database từ ảnh
+├── 📄 process_collected_faces.py  # Xử lý ảnh tự học & Augmentation
+├── 📄 setup_database.py           # Khởi tạo SQLite metadata
+├── 📄 w600k_r50.onnx              # Model ArcFace (ResNet50, 512d) — không upload git
+├── 📄 MiniFASNetV2.onnx           # Model Anti-Spoofing
+├── 📁 templates/                  # UI (Jinja2 Templates)
+├── 📁 static/                     # Assets (CSS/JS/Images)
+├── 📁 database/                   # Ảnh khuôn mặt gốc
+├── 📁 collected_faces/            # Ảnh chờ xử lý / processed
+└── 📁 qdrant_data/                # Vector Database
 ```
 
-## 🔒 Thông số tối ưu (Current Config)
+## ⚙️ Thông Số Kỹ Thuật
 
-- **Resolution:** 1280x720 (720p HD).
-- **Threshold:** 0.45 (Cơ bản) / 0.65 (Xác nhận tức thì).
-- **MiniFASNet Threshold:** 0.99 (Độ tin cậy liveness).
-- **Blink Threshold:** 0.20 (Ngưỡng nháy mắt).
-- **Image Enhance:** CLAHE 3.0 (Cân bằng sáng).
+| Thông số | Giá trị |
+|---|---|
+| **Resolution** | 1280×720 (720p HD) |
+| **Face Embedding** | ArcFace w600k_r50 (ONNX, 512d) |
+| **Face Detection** | Mediapipe Face Mesh (468 landmarks) |
+| **Alignment** | 5-Point Affine → 112×112 |
+| **Vector DB** | Qdrant (HNSW, Cosine Similarity) |
+| **Recognition Threshold** | 0.55 (cơ bản) / 0.75 (Fast Pass) |
+| **FAS Threshold** | 0.85 (liveness) |
+| **Blink Threshold** | 0.20 (EAR) |
+| **Stability Hold** | 0.8s |
 
 ## ❓ Troubleshooting
 
-- **Yêu cầu nháy mắt liên tục:** AI chưa đủ tin tưởng vào liveness (do ánh sáng hoặc chất lượng ảnh). Hãy đảm bảo khuôn mặt đủ sáng.
-- **Tắt ứng dụng:** Nếu nhấn Ctrl+C không tắt, hãy check lại file `app.py` xem đã được cập nhật bản FastAPI mới nhất chưa.
-- **Camera lag:** Đảm bảo PC của bạn hỗ trợ AVX2/FMA để thư viện TensorFlow/ONNX chạy nhanh hơn.
+- **Không nhận diện được ai:** Kiểm tra đã chạy `python init_qdrant.py` chưa. Nếu đổi model, phải re-index lại.
+- **Lỗi "Không tìm thấy model ArcFace":** Tải `w600k_r50.onnx` và đặt vào thư mục gốc (xem bước 4 phần cài đặt).
+- **Camera lag:** Đảm bảo PC hỗ trợ AVX2. Nếu có GPU NVIDIA, cài `onnxruntime-gpu` thay `onnxruntime` để tăng tốc.
+- **Yêu cầu nháy mắt liên tục:** AI chưa đủ tin tưởng liveness (do ánh sáng). Đảm bảo khuôn mặt đủ sáng.
+- **Qdrant connection error:** Kiểm tra Docker đang chạy: `docker-compose ps`.

@@ -29,6 +29,9 @@ flipped_faces/
 .DS_Store
 Thumbs.db
 
+# Model weights (ONNX)
+*.onnx
+
 # Logs
 *.log
 

@@ -7,7 +7,7 @@ import threading
 import time
 import os
 import numpy as np
-from deepface import DeepFace
+from arcface_onnx import get_arcface_model
 from pydantic import BaseModel
 
 # Import modules tự tạo
@@ -28,14 +28,13 @@ templates = Jinja2Templates(directory="templates")
 state = KioskState()
 setup_signals(state)
 
-# --- PRELOAD MODEL ---
-print("🚀 Đang tải model AI (FastAPI - Modular)...")
+# --- PRELOAD MODEL (ONNX Direct — chỉ 1 lần, singleton) ---
+print("🚀 Đang tải model AI (ONNX Direct)...")
 try:
-    dummy_img = np.zeros((112, 112, 3), dtype=np.uint8)
-    DeepFace.represent(img_path=dummy_img, model_name="ArcFace", detector_backend="skip", enforce_detection=False)
-    print("✅ Model AI đã sẵn sàng!")
+    arcface = get_arcface_model()  # Singleton: load 1 lần, dùng mãi
+    print(f"✅ ArcFace ONNX sẵn sàng! (Embedding: {arcface.embedding_size}d)")
 except Exception as e:
-    print(f"❌ Error preloading model: {e}")
+    print(f"❌ Error preloading ArcFace ONNX: {e}")
 
 # --- CAMERA THREAD ---
 def camera_worker():

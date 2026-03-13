@@ -1,7 +1,4 @@
 opencv-python>=4.5.0
-deepface>=0.0.79
-pandas>=1.3.0
-tf-keras>=2.15.0
 qdrant-client
 Pillow>=9.0.0
 mediapipe==0.10.11
@@ -11,4 +8,5 @@ fastapi
 uvicorn
 jinja2
 aiofiles
-
+numpy
+tqdm
