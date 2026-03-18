@@ -19,6 +19,7 @@ collected_faces/
 database_backup/
 flipped_faces/
 test_faces/
+test_faces_rejected/
 
 # IDE
 .vscode/

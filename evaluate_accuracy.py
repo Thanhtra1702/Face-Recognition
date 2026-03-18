@@ -1,4 +1,6 @@
 import os
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -15,7 +17,6 @@ def get_standard_aligned_face(frame, face_landmarks, target_size=(112, 112)):
     """Same alignment logic as recognition.py"""
     h, w = frame.shape[:2]
     landmarks = face_landmarks.landmark
-    # Standard 5 landmarks for ArcFace
     l_eye = np.mean([ (landmarks[33].x * w, landmarks[33].y * h), (landmarks[133].x * w, landmarks[133].y * h) ], axis=0)
     r_eye = np.mean([ (landmarks[362].x * w, landmarks[362].y * h), (landmarks[263].x * w, landmarks[263].y * h) ], axis=0)
     nose = (landmarks[1].x * w, landmarks[1].y * h)
@@ -50,43 +51,49 @@ def evaluate():
         print("No test images found in test_faces/.")
         return
 
-    print(f"🔬 Starting evaluation on {len(test_files)} images...")
+    print(f"Starting evaluation on {len(test_files)} images...")
     
+    total_images = len(test_files)
     correct = 0
     incorrect = 0
     rejected = 0
-    total = len(test_files)
+    no_face_detected = 0
+    
+    scores_correct = []
+    scores_incorrect = []
+    incorrect_details = []
 
     for file_path, true_sid in tqdm(test_files):
         img = cv2.imread(file_path)
-        if img is None: continue
+        if img is None: 
+            rejected += 1
+            continue
         
-        # 1. Align face
+        # 1. Detect & Align face
         rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = face_mesh.process(rgb_img)
         
         if not results.multi_face_landmarks:
             rejected += 1
+            no_face_detected += 1
             continue
         
         landmarks = results.multi_face_landmarks[0]
         face_aligned = get_standard_aligned_face(img, landmarks)
         
-        # 2. Avg Embedding (TTA) as in recognition.py
-        # Original
+        # 2. TTA Embedding (same as recognition.py)
         vec_orig = arcface.get_embedding(face_aligned, normalize=True)
-        # CLAHE
+        
         lab = cv2.cvtColor(face_aligned, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
         cl = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(l)
         img_clahe = cv2.merge((cl, a, b))
         img_clahe = cv2.cvtColor(img_clahe, cv2.COLOR_LAB2BGR)
         vec_clahe = arcface.get_embedding(img_clahe, normalize=True)
-        # Bright
+        
         img_bright = cv2.convertScaleAbs(face_aligned, alpha=1.2, beta=10)
         vec_bright = arcface.get_embedding(img_bright, normalize=True)
         
-        # Mean
         final_vec = np.mean([vec_orig, vec_clahe, vec_bright], axis=0)
         norm = np.linalg.norm(final_vec)
         final_vec = (final_vec / norm).tolist() if norm > 0 else final_vec.tolist()
@@ -98,7 +105,7 @@ def evaluate():
             rejected += 1
             continue
             
-        # 4. Consensus Logic
+        # 4. Consensus Logic (same as recognition.py)
         best_match = search_res[0]
         score = best_match.score
         pred_sid = best_match.payload['student_id']
@@ -111,28 +118,63 @@ def evaluate():
         top_voter = max(votes, key=votes.get)
         vote_count = votes[top_voter]
         
-        # Matching Logic from recognition.py: score > 0.55 and (current_sid == top_voter) and (vote_count >= 2)
         if score > THRESHOLD and (pred_sid == top_voter) and (vote_count >= 2):
             if pred_sid == true_sid:
                 correct += 1
+                scores_correct.append(score)
             else:
                 incorrect += 1
-                # print(f"❌ Mismatch: True={true_sid}, Pred={pred_sid}, Score={score:.3f}")
+                scores_incorrect.append(score)
+                incorrect_details.append((true_sid, pred_sid, score, vote_count))
         else:
-            rejected += 1 # Low confidence or inconsistent
+            rejected += 1
 
     face_mesh.close()
 
-    # --- SUMMARY ---
-    accuracy = (correct / total) * 100 if total > 0 else 0
-    print("\n" + "="*30)
-    print(f"📊 EVALUATION RESULTS")
-    print(f"Total:      {total}")
-    print(f"Correct:    {correct}")
-    print(f"Incorrect:  {incorrect}")
-    print(f"Rejected:   {rejected} (Threshold: {THRESHOLD})")
-    print(f"Accuracy:   {accuracy:.2f}%")
-    print("="*30)
+    # ═══════════════════════════════════════════════════
+    # RESULTS
+    # ═══════════════════════════════════════════════════
+    
+    accepted = correct + incorrect  # Chi tinh nhung anh he thong da chap nhan
+    
+    acc_overall = (correct / total_images) * 100 if total_images > 0 else 0
+    acc_accepted = (correct / accepted) * 100 if accepted > 0 else 0
+    far = (incorrect / accepted) * 100 if accepted > 0 else 0
+    
+    print("\n" + "="*55)
+    print("  EVALUATION RESULTS")
+    print("="*55)
+    
+    print(f"\n  [A] OVERALL (All {total_images} test images)")
+    print(f"  {'─'*50}")
+    print(f"  Total images:          {total_images}")
+    print(f"  Accepted by system:    {accepted}")
+    print(f"  Rejected by system:    {rejected}  (incl. {no_face_detected} no-face)")
+    print(f"  Rejection Rate:        {rejected/total_images*100:.2f}%")
+    
+    print(f"\n  [B] ACCEPTED-ONLY ({accepted} images the system identified)")
+    print(f"  {'─'*50}")
+    print(f"  Correct (TP):          {correct}")
+    print(f"  Incorrect (FP):        {incorrect}")
+    print(f"  Accuracy (Precision):  {acc_accepted:.2f}%")
+    print(f"  False Accept Rate:     {far:.2f}%")
+    
+    if scores_correct:
+        print(f"\n  [C] SCORE STATISTICS")
+        print(f"  {'─'*50}")
+        print(f"  Avg Score (Correct):   {np.mean(scores_correct):.4f}")
+        print(f"  Min Score (Correct):   {np.min(scores_correct):.4f}")
+        print(f"  Max Score (Correct):   {np.max(scores_correct):.4f}")
+    if scores_incorrect:
+        print(f"  Avg Score (Incorrect): {np.mean(scores_incorrect):.4f}")
+    
+    if incorrect_details:
+        print(f"\n  [D] FALSE ACCEPTANCE DETAILS ({len(incorrect_details)} cases)")
+        print(f"  {'─'*50}")
+        for true_id, pred_id, sc, vc in incorrect_details:
+            print(f"  True={true_id:<25} Pred={pred_id:<25} Score={sc:.3f} Votes={vc}/5")
+    
+    print("\n" + "="*55)
 
 if __name__ == "__main__":
     evaluate()
